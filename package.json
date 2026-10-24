@@ -1,0 +1,33 @@
+{
+  "name": "zhixu-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "知序：视频、知识与复习的本地学习工作台",
+  "author": "Local Workspace",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "build": "tsc --noEmit && vite build",
+    "start": "electron .",
+    "smoke": "node scripts/smoke.cjs",
+    "test": ".venv\\Scripts\\python.exe -X utf8 -m unittest discover -s tests -v",
+    "pack": "electron-builder --win dir",
+    "dist:win": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "45.0.0",
+    "electron-builder": "26.18.0",
+    "playwright": "1.64.1",
+    "typescript": "~5.9.3",
+    "vite": "8.3.5"
+  },
+  "build": {
+    "appId": "local.zhixu.desktop",
+    "productName": "Zhixu",
+    "directories": {"output": "release"},
+    "electronDist": "node_modules/electron/dist",
+    "files": ["dist/**/*", "desktop/**/*", "package.json"],
+    "extraResources": [{"from": "build/zhixu-backend", "to": "backend"}],
+    "win": {"target": "portable", "signAndEditExecutable": false},
+    "portable": {"artifactName": "Zhixu-0.1.0.exe"}
+  }
+}
