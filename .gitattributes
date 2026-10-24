@@ -1,0 +1,2 @@
+# Preserve the exact bytes of the unmodified upstream source on Windows.
+vendor/mem0/** -text -whitespace

@@ -3,6 +3,7 @@ from .provider import Provider, redact
 from .review import Review
 from .store import Store
 from .vectors import VectorIndex
+from .mem0_engine import Mem0Engine
 
 
 class Service:
@@ -10,22 +11,25 @@ class Service:
         self.store = Store(directory)
         self.store.recover_jobs()
         self.vectors = VectorIndex(self.store)
+        self.mem0 = Mem0Engine(self.store)
 
     def close(self):
+        self.mem0.close()
         self.vectors.close()
         self.store.close()
 
     def dispatch(self, action, args=None, api_key=''):
         args = args or {}
         provider = Provider(self.store.settings(), api_key)
-        knowledge = Knowledge(self.store, provider, self.vectors)
+        knowledge = Knowledge(self.store, provider, self.vectors, self.mem0)
         review = Review(self.store, provider)
         if action == 'bootstrap':
             return {'documents': [{**d, 'content': d['content'][:180]} for d in self.store.documents()],
                     'cards': self.store.cards(), 'memories': self.store.memories(), 'sessions': self.store.sessions(),
                     'relations': self.store.relations(), 'settings': self.store.settings(),
                     'conversations': self.store.conversations(), 'data_directory': str(self.store.directory),
-                    'jobs': self.store.rows('SELECT id,kind,status,error,created_at FROM jobs ORDER BY created_at DESC LIMIT 5')}
+                    'jobs': self.store.rows('SELECT id,kind,status,error,created_at FROM jobs ORDER BY created_at DESC LIMIT 5'),
+                    'mem0': self.mem0.status(provider)}
         if action == 'document':
             return {'document': self.store.document(args['id']), 'segments': self.store.segments(args['id']), 'relations': self.store.relations(args['id'])}
         if action == 'import_text':
@@ -36,10 +40,12 @@ class Service:
             return knowledge.tutorial(args['id'])
         if action == 'update_document':
             if self.store.document(args['id'])['kind'] == 'text':
+                self.mem0.remove(['segment:' + s['id'] for s in self.store.segments(args['id'])])
                 self.vectors.remove([s['id'] for s in self.store.segments(args['id'])])
             return self.store.update_document(args['id'], args['title'], redact(args['content']))
         if action == 'delete_document':
             ids = [s['id'] for s in self.store.segments(args['id'])]
+            self.mem0.remove(['segment:' + i for i in ids])
             self.vectors.remove(ids)
             self.store.delete_document(args['id'])
             return True
@@ -51,6 +57,7 @@ class Service:
         if action == 'save_memory':
             return self.store.save_memory(redact(args['title']), redact(args['text']), args.get('kind', 'preference'))
         if action == 'delete_memory':
+            self.mem0.remove(['personal:' + args['id']])
             self.store.delete_memory(args['id'])
             return True
         if action == 'related':
@@ -78,6 +85,6 @@ class Service:
             if result.get('ok') is not True:
                 raise ValueError('服务已响应，但未按要求返回 JSON，请确认模型支持结构化文本输出')
             return {'message': '连接成功，模型可以返回 JSON'}
-        if action == 'build_index':
-            return self.vectors.build(provider)
+        if action in ('build_index', 'sync_mem0'):
+            return self.mem0.sync(provider)
         raise ValueError('不支持的操作')

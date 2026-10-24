@@ -1,7 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 const actions = new Set(['bootstrap','document','import_text','import_video','tutorial','update_document',
   'delete_document','add_card','delete_card','save_memory','delete_memory','related','set_relation',
-  'search','ask','generate_quiz','quiz','save_draft','submit_quiz','save_settings','test_model','build_index']);
+  'search','ask','generate_quiz','quiz','save_draft','submit_quiz','save_settings','test_model','build_index','sync_mem0']);
 contextBridge.exposeInMainWorld('knowledge', {
   call: (action, args = {}) => {
     if (!actions.has(action)) return Promise.reject(new Error('不支持的操作'));

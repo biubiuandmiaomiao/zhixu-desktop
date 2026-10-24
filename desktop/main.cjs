@@ -19,7 +19,7 @@ let win, backend, dataDir, apiKey = '', closeReady = false, allowClose = false, 
 const pending = new Map();
 const allowed = new Set(['bootstrap','document','import_text','import_video','tutorial','update_document',
   'delete_document','add_card','delete_card','save_memory','delete_memory','related','set_relation',
-  'search','ask','generate_quiz','quiz','save_draft','submit_quiz','save_settings','test_model','build_index']);
+  'search','ask','generate_quiz','quiz','save_draft','submit_quiz','save_settings','test_model','build_index','sync_mem0']);
 
 function rpc(action, args = {}) {
   return new Promise((resolve, reject) => {

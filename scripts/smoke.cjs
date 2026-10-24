@@ -15,9 +15,10 @@ async function main() {
     if (req.url.endsWith('/embeddings')) {
       output = { data: payload.input.map((text, index) => ({ index, embedding: [1, text.includes('闭包') ? 1 : 0, text.includes('函数') ? 1 : 0, .1] })) };
     } else {
-      const prompt = payload.messages[0].content, user = JSON.parse(payload.messages[1].content);
+      const prompt = payload.messages[0].content; let user; try { user = JSON.parse(payload.messages[1].content); } catch { user = {raw:payload.messages[1].content}; }
       let value;
-      if (prompt.includes('grades')) value = { grades: user.answers.map(q => ({ question_id: q.id, score: 8, feedback: '理解了变量捕获，请进一步举例说明生命周期。' })) };
+      if (user.raw && user.raw.includes('## New Messages')) value = {memory:[{text:'闭包捕获外层变量，装饰器可通过闭包包装函数并添加日志。'}]};
+      else if (prompt.includes('grades')) value = { grades: user.answers.map(q => ({ question_id: q.id, score: 8, feedback: '理解了变量捕获，请进一步举例说明生命周期。' })) };
       else if (prompt.includes('questions')) value = { questions: ['single','single','single','single','multiple','multiple','multiple','short','short','short'].map((type, i) => ({
         type, prompt: ['闭包怎样保留外部函数中的变量？','闭包与普通函数返回值有什么不同？','哪种写法能形成捕获变量的闭包？','装饰器包装函数的主要用途是什么？','下面哪些场景适合使用闭包？','装饰器可以为函数添加哪些能力？','关于闭包变量生命周期哪些说法正确？','请用自己的话解释闭包如何捕获变量。','请描述一个装饰器添加日志的过程。','闭包和装饰器之间存在什么联系？'][i],
         options: type === 'short' ? [] : [{ id:'A',text:'通过内层函数保留并使用外部变量' },{ id:'B',text:'能够保存调用间需要的状态' },{ id:'C',text:'所有函数必须使用全局变量' },{ id:'D',text:'函数返回后任何变量都无法访问' }],
@@ -86,8 +87,13 @@ async function main() {
     await page.getByRole('button', { name:'保存设置', exact:true }).click(); await settle(page);
     await page.getByRole('button', { name:'测试已保存的连接' }).click(); await settle(page);
     await page.getByRole('status').filter({ hasText:'连接成功' }).waitFor();
-    await page.getByRole('button', { name:'建立语义索引' }).click(); await settle(page);
-    await page.getByRole('status').filter({ hasText:'语义索引' }).waitFor();
+    await page.getByRole('button', { name:'同步 mem0 记忆' }).click(); await settle(page);
+    await page.getByRole('status').filter({ hasText:'mem0 已同步' }).waitFor();
+    const memoryStatus = await page.evaluate(async () => (await window.knowledge.call('bootstrap')).mem0);
+    assert.equal(memoryStatus.engine, 'mem0'); assert.equal(memoryStatus.version, '2.2.1');
+    assert(memoryStatus.knowledge_count >= 2); assert(memoryStatus.personal_count >= 1);
+    const semanticOnly = await page.evaluate(async () => window.knowledge.call('search', { query:'lexically-unmatched-query' }));
+    assert(semanticOnly.results.some(s => s.retrieval === 'mem0' && s.facts.length > 0));
     await page.getByRole('button', { name:'知识库', exact:false }).first().click();
     await page.screenshot({ path:path.join(artifacts, 'library.png') });
     await page.getByRole('button', { name:'复习与题库', exact:false }).click();
@@ -102,6 +108,8 @@ async function main() {
     const shortIndex = draft.questions.findIndex(q => q.type === 'short');
     await page.getByRole('button', { name:`第 ${shortIndex+1} 题`, exact:true }).click();
     await page.locator('.question-top').getByText(`第 ${shortIndex+1} / 10 题 · 10 分`, { exact:true }).waitFor();
+    // Clicking the active question must not replace a textarea while typing.
+    await page.getByRole('button', { name:`第 ${shortIndex+1} 题`, exact:true }).click();
     await page.locator('#short-answer').fill('关闭窗口前的最后一笔草稿');
     const closed = app.waitForEvent('close');
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
@@ -143,7 +151,7 @@ async function main() {
     await page.getByRole('button', { name:'知识问答', exact:false }).click();
     assert.equal(await page.locator('.answer-card').count(), 0);
     assert.deepEqual(errors, []);
-    console.log('PASS: actual Electron import, collection, memory, encrypted settings, local vector index, ten-question generation, close/restart draft recovery, scoring 94/100, cited answers and deletion cache cleanup.');
+    console.log('PASS: actual Electron import, collection, memory, encrypted settings, real mem0 extraction and retrieval, ten-question generation, close/restart draft recovery, scoring 94/100, cited answers and deletion cache cleanup.');
     console.log('Screenshots: ' + artifacts);
   } finally { if (app) await app.close(); await new Promise(resolve => server.close(resolve)); }
 }

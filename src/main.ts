@@ -90,7 +90,7 @@ function nav() {
   return `<aside class="sidebar"><div class="brand"><span class="brand-mark">${icon('leaf')}</span><div>知序<small>ZHIXU · YOUR LEARNING SPACE</small></div></div>
     ${button('new', icon('plus') + ' 导入学习资料', 'button primary add-button')}
     <div class="nav-label">我的学习空间</div><nav>${items.map(([view, ico, label, count]) => `<button data-action="nav" data-view="${view}" class="nav-item ${state.view === view ? 'active' : ''}">${icon(String(ico))}<span>${label}</span>${count !== '' ? `<small>${count}</small>` : ''}</button>`).join('')}</nav>
-    <div class="sidebar-bottom"><div class="local-badge"><i></i> 本地知识库 <span>只属于你</span></div><button data-action="nav" data-view="settings" class="nav-item ${state.view === 'settings' ? 'active' : ''}">${icon('gear')}<span>模型与设置</span></button><div class="version">知序 · Windows 预览版 0.1</div></div></aside>`;
+    <div class="sidebar-bottom"><div class="local-badge"><i></i> 本地知识库 <span>只属于你</span></div><button data-action="nav" data-view="settings" class="nav-item ${state.view === 'settings' ? 'active' : ''}">${icon('gear')}<span>模型与设置</span></button><div class="version">知序 · Windows 预览版 0.2</div></div></aside>`;
 }
 
 function library() {
@@ -173,8 +173,8 @@ function settingsView() {
   const s = state.data.settings;
   return `<div class="page-heading"><div class="eyebrow">YOUR MODELS, YOUR KNOWLEDGE</div><h1>模型与设置</h1><p>使用你自己的在线 AI 服务。知识保存在本地，需要处理的片段会发送给所配置的服务。</p></div>
     <div class="settings-layout"><form id="settings-form" class="settings-card"><h2>对话与生成模型</h2><label for="base-url">兼容 API 地址（包含 /v1 等前缀）</label><input id="base-url" name="base_url" type="url" placeholder="https://你的服务地址/v1" value="${e(s.base_url || '')}" required/><label for="model">对话模型名称</label><input id="model" name="model" placeholder="填写服务商提供的准确模型 ID" value="${e(s.model || '')}" required/><label for="api-key">API Key ${state.data.has_api_key ? '<span class="confirmed">· 已加密保存</span>' : ''}</label><input id="api-key" name="api_key" type="password" autocomplete="new-password" placeholder="${state.data.has_api_key ? '留空保留现有密钥' : '输入你的 API Key'}"/>
-    <div class="form-divider"></div><h2>语义检索 <span class="pill">可选</span></h2><p>未配置时仍可使用本地关键词搜索。首次配置或导入新资料后，需手动建立语义索引。</p><label for="embedding-model">Embedding 模型名称</label><input id="embedding-model" name="embedding_model" value="${e(s.embedding_model || '')}" placeholder="填写支持中文的 Embedding 模型 ID"/><label for="embedding-url">Embedding API 地址</label><input id="embedding-url" name="embedding_url" type="url" value="${e(s.embedding_url || '')}" placeholder="留空使用上面的 API 地址"/><p class="small-note">Embedding 与对话共用此 API Key，请填写同一服务商或兼容网关的地址。</p><div class="toolbar"><button type="submit" class="button primary">保存设置</button>${button('test-model', '测试已保存的连接')}${button('build-index', '建立语义索引')}</div></form>
-    <aside><div class="context-box"><h3>数据留在你的电脑</h3><p>教程、收藏、题库和记忆保存在：</p><code class="data-path">${e(state.data.data_directory)}</code><p>密钥使用系统加密保存。关闭应用后数据仍保留。</p>${state.data.has_api_key ? button('remove-key', '移除已保存的 API Key', 'button danger-quiet') : ''}</div><div class="context-box"><h3>关于当前版本</h3><p>支持文本、Markdown、SRT / VTT / B 站字幕 JSON。B 站自动导入依赖视频提供可获取的字幕。</p><p>当前没有音频转写或截图提取。简答评分由 AI 辅助，适合学习反馈。</p></div></aside></div>`;
+    <div class="form-divider"></div><h2>语义检索 <span class="pill">可选</span></h2><p>未配置时仍可使用本地关键词搜索。mem0 从原文提取知识并存入本地。首次配置或导入新资料后，请同步记忆；未配置时可使用关键词搜索。</p><label for="embedding-model">Embedding 模型名称</label><input id="embedding-model" name="embedding_model" value="${e(s.embedding_model || '')}" placeholder="填写支持中文的 Embedding 模型 ID"/><label for="embedding-url">Embedding API 地址</label><input id="embedding-url" name="embedding_url" type="url" value="${e(s.embedding_url || '')}" placeholder="留空使用上面的 API 地址"/><p class="small-note">Embedding 与对话共用此 API Key，请填写同一服务商或兼容网关的地址。</p><div class="toolbar"><button type="submit" class="button primary">保存设置</button>${button('test-model', '测试已保存的连接')}${button('build-index', '同步 mem0 记忆')}</div></form>
+    <aside><div class="context-box"><h3>记忆引擎 · mem0 ${e(state.data.mem0.version)}</h3><p>已接入下载源码的 Memory.add / search。</p><p>${state.data.mem0.knowledge_count} 条知识事实 · ${state.data.mem0.personal_count} 条个人记忆<br>${state.data.mem0.pending} 项资料或记忆待同步</p><p>需要对话模型与 Embedding 模型，使用当前 API Key。</p></div><div class="context-box"><h3>数据留在你的电脑</h3><p>教程、收藏、题库和记忆保存在：</p><code class="data-path">${e(state.data.data_directory)}</code><p>密钥使用系统加密保存。关闭应用后数据仍保留。</p>${state.data.has_api_key ? button('remove-key', '移除已保存的 API Key', 'button danger-quiet') : ''}</div><div class="context-box"><h3>关于当前版本</h3><p>支持文本、Markdown、SRT / VTT / B 站字幕 JSON。B 站自动导入依赖视频提供可获取的字幕。</p><p>当前没有音频转写或截图提取。简答评分由 AI 辅助，适合学习反馈。</p></div></aside></div>`;
 }
 
 function searchView() {
@@ -254,7 +254,13 @@ root.addEventListener('click', async event => {
   if (a === 'ask-current') { state.askScope = state.selected; state.view = 'ask'; render(); return; }
   if (a === 'review-current') { state.reviewScope = state.selected; state.quiz = null; state.view = 'review'; render(); return; }
   if (a === 'close-quiz') { await work('保存练习…', async () => { await saveDraft(); state.quiz = null; await refresh(); }); return; }
-  if (a === 'question' || a === 'previous' || a === 'next') { await saveDraft().catch(err => toast(err.message, true)); state.question = a === 'question' ? Number(target.dataset.index) : state.question + (a === 'next' ? 1 : -1); render(); return; }
+  if (a === 'question' || a === 'previous' || a === 'next') {
+    const next = a === 'question' ? Number(target.dataset.index) : state.question + (a === 'next' ? 1 : -1);
+    if (next === state.question) return;
+    const saving = saveDraft();
+    state.question = next; render();
+    await saving.catch(err => toast(err.message, true)); return;
+  }
   if (a === 'past-answer') { const c = state.data.conversations.find((c: Row) => c.id === id); state.answer = c; state.lastQuestion = c.question; render(); return; }
   if (a === 'bookmark') {
     const selection = window.getSelection(); const text = selection?.toString().trim();
@@ -272,7 +278,7 @@ root.addEventListener('click', async event => {
     // Native confirm is supported by Electron and keeps deletion explicit.
     if (!window.confirm('删除这份资料？关联收藏和含有该来源的练习也会删除，此操作无法撤销。')) { state.modal = ''; return; }
   }
-  await work(({ 'import-file': '读取资料文件…', 'generate-tutorial': '正在根据来源整理教程…', 'related-ai': '正在分析教程之间的关系…', 'build-index': '正在建立语义索引…' } as Row)[a!] || '处理中…', async () => {
+  await work(({ 'import-file': '读取资料文件…', 'generate-tutorial': '正在根据来源整理教程…', 'related-ai': '正在分析教程之间的关系…', 'build-index': 'mem0 正在抽取并保存知识，首次同步可能需要几分钟…' } as Row)[a!] || '处理中…', async () => {
     if (a === 'document') await openDoc(id);
     if (a === 'citation') { const data = await api.call('document', { id: target.dataset.doc }); state.citation = data.segments.find((s: Row) => s.id === id); if (!state.citation) throw new Error('来源片段已更新或删除'); state.modal = 'citation'; }
     if (a === 'source-video') { const url = new URL(target.dataset.url!); url.searchParams.set('t', String(Math.floor(Number(target.dataset.time)))); await api.openLink(url.toString().replace(/^http:/, 'https:')); }
@@ -286,7 +292,7 @@ root.addEventListener('click', async event => {
     if (a === 'generate-tutorial') { await api.call('tutorial', { id: state.selected }); await refresh(); await openDoc(state.selected); toast('已生成教程，原始来源片段仍保留'); }
     if (a === 'open-quiz') { state.quiz = await api.call('quiz', { id }); state.question = 0; }
     if (a === 'test-model') { const result = await api.call('test_model'); toast(result.message); }
-    if (a === 'build-index') { const result = await api.call('build_index'); toast(result.message); }
+    if (a === 'build-index') { const result = await api.call('sync_mem0'); await refresh(); toast(result.message); }
     if (a === 'remove-key') { await api.saveCredential(''); await refresh(); toast('已移除 API Key'); }
   });
 });
