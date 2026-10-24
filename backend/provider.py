@@ -1,5 +1,7 @@
 import json
 import re
+import time
+from contextlib import contextmanager
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,6 +29,23 @@ class Provider:
     def __init__(self, settings, api_key=''):
         self.settings = settings
         self.api_key = api_key
+        # One Provider is created per backend operation; leave margin before IPC's 300 s limit.
+        self._deadline = time.monotonic() + 240
+
+    @contextmanager
+    def budget(self, seconds):
+        previous = self._deadline
+        self._deadline = min(previous, time.monotonic() + seconds)
+        try:
+            yield
+        finally:
+            self._deadline = previous
+
+    def _timeout(self):
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError('AI 请求时间预算已用尽，已保存内容不受影响，请稍后重试')
+        return min(100, remaining)
 
     def request(self, endpoint, payload, embedding=False):
         if not self.api_key:
@@ -44,8 +63,21 @@ class Provider:
             def redirect_request(self, req, fp, code, msg, headers, newurl):
                 return None
         try:
-            with urllib.request.build_opener(NoRedirect).open(req, timeout=100) as response:
-                return json.loads(response.read(5_000_000))
+            with urllib.request.build_opener(NoRedirect).open(req, timeout=self._timeout()) as response:
+                parts, size = [], 0
+                while size < 5_000_000:
+                    timeout = self._timeout()
+                    # Recompute the socket timeout for each read, including trickling responses.
+                    socket = getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
+                    if socket is not None:
+                        socket.settimeout(timeout)
+                    chunk = response.read1(min(65536, 5_000_000 - size))
+                    self._timeout()
+                    if not chunk:
+                        break
+                    parts.append(chunk)
+                    size += len(chunk)
+                return json.loads(b''.join(parts))
         except urllib.error.HTTPError as exc:
             raise ValueError(f'AI 服务返回 HTTP {exc.code}，请检查地址、密钥、模型和额度') from None
         except (urllib.error.URLError, TimeoutError, OSError):
@@ -65,10 +97,12 @@ class Provider:
         return parse_json(content)
 
     def embed(self, texts):
+        self._timeout()
         model = self.settings.get('embedding_model', '')
         if not model:
             raise ValueError('未配置 Embedding 模型，当前使用本地关键词检索')
         response = self.request('/embeddings', {'model': model, 'input': texts}, embedding=True)
+        self._timeout()
         try:
             vectors = [r['embedding'] for r in sorted(response['data'], key=lambda x: x['index'])]
             if len(vectors) != len(texts) or not vectors or not all(isinstance(v, list) and v for v in vectors):

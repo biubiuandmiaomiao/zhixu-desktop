@@ -1,6 +1,6 @@
 {
   "name": "zhixu-desktop",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "知序：视频、知识与复习的本地学习工作台",
   "author": "Local Workspace",
@@ -29,6 +29,6 @@
     "files": ["dist/**/*", "desktop/**/*", "package.json"],
     "extraResources": [{"from": "build/zhixu-backend", "to": "backend"}, {"from": "vendor/mem0/LICENSE", "to": "third-party/mem0-LICENSE"}, {"from": "vendor/mem0/UPSTREAM.json", "to": "third-party/mem0-UPSTREAM.json"}],
     "win": {"target": "portable", "signAndEditExecutable": false},
-    "portable": {"artifactName": "Zhixu-0.2.0.exe"}
+    "portable": {"artifactName": "Zhixu-0.3.0.exe"}
   }
 }

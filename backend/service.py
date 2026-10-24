@@ -22,7 +22,7 @@ class Service:
         args = args or {}
         provider = Provider(self.store.settings(), api_key)
         knowledge = Knowledge(self.store, provider, self.vectors, self.mem0)
-        review = Review(self.store, provider)
+        review = Review(self.store, provider, self.mem0)
         if action == 'bootstrap':
             return {'documents': [{**d, 'content': d['content'][:180]} for d in self.store.documents()],
                     'cards': self.store.cards(), 'memories': self.store.memories(), 'sessions': self.store.sessions(),
@@ -40,14 +40,17 @@ class Service:
             return knowledge.tutorial(args['id'])
         if action == 'update_document':
             if self.store.document(args['id'])['kind'] == 'text':
-                self.mem0.remove(['segment:' + s['id'] for s in self.store.segments(args['id'])])
+                self.mem0.remove_document(args['id'])
                 self.vectors.remove([s['id'] for s in self.store.segments(args['id'])])
-            return self.store.update_document(args['id'], args['title'], redact(args['content']))
+            result = self.store.update_document(args['id'], args['title'], redact(args['content']))
+            self.mem0.prune()
+            return result
         if action == 'delete_document':
             ids = [s['id'] for s in self.store.segments(args['id'])]
-            self.mem0.remove(['segment:' + i for i in ids])
+            self.mem0.remove_document(args['id'])
             self.vectors.remove(ids)
             self.store.delete_document(args['id'])
+            self.mem0.prune()
             return True
         if action == 'add_card':
             return self.store.add_card(args['document_id'], redact(args['text']), args.get('segment_id'))
@@ -57,12 +60,13 @@ class Service:
         if action == 'save_memory':
             return self.store.save_memory(redact(args['title']), redact(args['text']), args.get('kind', 'preference'))
         if action == 'delete_memory':
-            self.mem0.remove(['personal:' + args['id']])
             self.store.delete_memory(args['id'])
             return True
         if action == 'related':
             return knowledge.related(args['id'], args.get('use_ai', False))
         if action == 'set_relation':
+            if args['status'] != 'confirmed':
+                self.mem0.remove(['relation:' + args['id']])
             self.store.set_relation(args['id'], args['status'])
             return True
         if action == 'search':

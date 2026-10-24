@@ -8,6 +8,7 @@ async function main() {
   const directory = path.resolve(__dirname, '..', '.test-data', 'smoke-' + Date.now());
   const artifacts = path.resolve(__dirname, '..', 'artifacts');
   fs.mkdirSync(artifacts, { recursive: true });
+  const modelCalls = [];
   const server = http.createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk;
     const payload = JSON.parse(raw);
@@ -16,6 +17,7 @@ async function main() {
       output = { data: payload.input.map((text, index) => ({ index, embedding: [1, text.includes('闭包') ? 1 : 0, text.includes('函数') ? 1 : 0, .1] })) };
     } else {
       const prompt = payload.messages[0].content; let user; try { user = JSON.parse(payload.messages[1].content); } catch { user = {raw:payload.messages[1].content}; }
+      modelCalls.push({ prompt, user });
       let value;
       if (user.raw && user.raw.includes('## New Messages')) value = {memory:[{text:'闭包捕获外层变量，装饰器可通过闭包包装函数并添加日志。'}]};
       else if (prompt.includes('grades')) value = { grades: user.answers.map(q => ({ question_id: q.id, score: 8, feedback: '理解了变量捕获，请进一步举例说明生命周期。' })) };
@@ -91,7 +93,9 @@ async function main() {
     await page.getByRole('status').filter({ hasText:'mem0 已同步' }).waitFor();
     const memoryStatus = await page.evaluate(async () => (await window.knowledge.call('bootstrap')).mem0);
     assert.equal(memoryStatus.engine, 'mem0'); assert.equal(memoryStatus.version, '2.2.1');
-    assert(memoryStatus.knowledge_count >= 2); assert(memoryStatus.personal_count >= 1);
+    assert(memoryStatus.knowledge_count >= 2); assert.equal(memoryStatus.preference_count, 1);
+    assert(memoryStatus.relation_count >= 1); assert(!('personal_count' in memoryStatus));
+    await page.screenshot({ path:path.join(artifacts, 'mem0-settings.png') });
     const semanticOnly = await page.evaluate(async () => window.knowledge.call('search', { query:'lexically-unmatched-query' }));
     assert(semanticOnly.results.some(s => s.retrieval === 'mem0' && s.facts.length > 0));
     await page.getByRole('button', { name:'知识库', exact:false }).first().click();
@@ -105,6 +109,10 @@ async function main() {
     const draft = await page.evaluate(id => window.knowledge.call('quiz', { id }), firstSession.id);
     assert.equal(draft.questions.length, 10);
     assert(draft.questions.every(q => !('answer' in q) && !('rubric' in q)));
+    assert(draft.learning_memory_count > 0);
+    const generation = modelCalls.find(c => c.prompt.includes('questions') && c.user.preferences);
+    assert(generation.user.preferences.some(p => p.text === '先给例子，再讲概念。'));
+    assert(generation.user.learning_memories.some(m => m.kind === 'relation'));
     const shortIndex = draft.questions.findIndex(q => q.type === 'short');
     await page.getByRole('button', { name:`第 ${shortIndex+1} 题`, exact:true }).click();
     await page.locator('.question-top').getByText(`第 ${shortIndex+1} / 10 题 · 10 分`, { exact:true }).waitFor();
@@ -136,11 +144,19 @@ async function main() {
     await page.getByLabel('你的问题').fill('闭包和装饰器有什么联系？');
     await page.getByRole('button', { name:'开始提问', exact:true }).click(); await settle(page);
     assert.equal(await page.locator('.citation').count(), 1);
+    await page.getByLabel('你的问题').fill('上次关于闭包的问题，我还需要复习什么？');
+    await page.getByRole('button', { name:'开始提问', exact:true }).click(); await settle(page);
+    const contextualAnswer = modelCalls.filter(c => c.user.question).at(-1);
+    assert(contextualAnswer.user.preferences.some(p => p.text === '先给例子，再讲概念。'));
+    assert(contextualAnswer.user.learning_memories.some(m => m.kind === 'conversation'));
+    await page.evaluate(() => window.knowledge.call('sync_mem0'));
     await page.screenshot({ path:path.join(artifacts, 'answer.png') });
     assert.deepEqual(errors, []);
     const stored = await page.evaluate(async () => window.knowledge.call('bootstrap'));
     assert.equal(stored.cards.length, 1); assert.equal(stored.memories.length, 1);
     assert.equal(stored.sessions[0].status, 'completed');
+    assert.equal(stored.mem0.review_count, 10);
+    assert(stored.mem0.conversation_count >= 2);
     await page.getByRole('button', { name:'知识库', exact:false }).first().click();
     const citedDocument = stored.conversations[0].citations[0].document_id;
     await page.locator(`.document-card[data-id="${citedDocument}"]`).click(); await settle(page);
@@ -150,8 +166,10 @@ async function main() {
     assert.equal(await page.locator('.question-card').count(), 0);
     await page.getByRole('button', { name:'知识问答', exact:false }).click();
     assert.equal(await page.locator('.answer-card').count(), 0);
+    const remaining = await page.evaluate(async () => window.knowledge.call('bootstrap'));
+    assert.equal(remaining.mem0.review_count, 0); assert.equal(remaining.mem0.relation_count, 0);
     assert.deepEqual(errors, []);
-    console.log('PASS: actual Electron import, collection, memory, encrypted settings, real mem0 extraction and retrieval, ten-question generation, close/restart draft recovery, scoring 94/100, cited answers and deletion cache cleanup.');
+    console.log('PASS: actual Electron import, collection, direct preferences, real mem0 knowledge/relations/reviews/questions, scoped generation context, ten questions, close/restart drafts, score 94/100, citations and derived-memory deletion.');
     console.log('Screenshots: ' + artifacts);
   } finally { if (app) await app.close(); await new Promise(resolve => server.close(resolve)); }
 }

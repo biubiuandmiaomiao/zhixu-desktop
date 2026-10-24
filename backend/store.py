@@ -298,8 +298,10 @@ class Store:
         with self.db:
             self.db.execute('INSERT INTO conversations VALUES(?,?,?,?,?)', (uid(), question, answer, json.dumps(citations, ensure_ascii=False), now()))
 
-    def conversations(self):
-        return [{**r, 'citations': json.loads(r['citations'])} for r in self.rows('SELECT * FROM conversations ORDER BY created_at DESC LIMIT 20')]
+    def conversations(self, limit=20):
+        sql = 'SELECT * FROM conversations ORDER BY created_at DESC,rowid DESC'
+        return [{**r, 'citations': json.loads(r['citations'])}
+                for r in self.rows(sql + (' LIMIT ?' if limit is not None else ''), (limit,) if limit is not None else ())]
 
     def forget_conversations(self, document_id):
         for row in self.rows('SELECT id,citations FROM conversations'):

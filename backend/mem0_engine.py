@@ -8,6 +8,7 @@ import time
 
 from .provider import parse_json, redact
 from .store import now
+from .learning_memory import LANES, learning_entities
 
 os.environ['MEM0_TELEMETRY'] = 'False'
 
@@ -47,7 +48,7 @@ class Mem0Engine:
         return bool(provider.api_key and provider.settings.get('model') and provider.settings.get('embedding_model'))
 
     def entities(self):
-        result = {}
+        result = learning_entities(self.store)
         for segment in self.store.segments():
             result['segment:' + segment['id']] = {'text': segment['title'] + '\n' + segment['text'],
                 'metadata': {'lane': 'knowledge', 'workspace': 'default', 'segment_id': segment['id'], 'document_id': segment['document_id']}}
@@ -172,12 +173,19 @@ class Mem0Engine:
             for row in self.store.rows('SELECT namespace FROM mem0_sync WHERE entity=?', (entity,)):
                 self._clear(row['namespace'], entity)
 
-    def sync(self, provider, limit=24):
+    def remove_document(self, document_id):
+        self.remove([key for key, entity in self.entities().items()
+                     if entity['metadata'].get('document_id') == document_id
+                     or document_id in entity['metadata'].get('document_ids', [])])
+
+    def sync(self, provider, limit=24, learning_only=False):
         deadline = time.monotonic() + 160
         name, memory = self._get(provider)
         self.prune()
         completed = 0
         for key, entity in self.entities().items():
+            if learning_only and entity['metadata']['lane'] not in LANES:
+                continue
             previous = self.store.rows('SELECT fingerprint,status FROM mem0_sync WHERE namespace=? AND entity=?', (name, key))
             fingerprint = digest(entity)
             if previous and previous[0]['status'] == 'done' and previous[0]['fingerprint'] == fingerprint:
@@ -204,7 +212,7 @@ class Mem0Engine:
                 self.store.db.execute("UPDATE mem0_sync SET status='done',updated_at=? WHERE namespace=? AND entity=?", (now(), name, key))
             completed += 1
         status = self.status(provider)
-        status['message'] = f"mem0 已同步 {completed} 项，知识事实 {status['knowledge_count']} 条" + (f"；还有 {status['pending']} 项待同步，可再次点击继续" if status['pending'] else '')
+        status['message'] = f"mem0 已同步 {completed} 项，知识事实 {status['knowledge_count']} 条，学习经历 {status['learning_count']} 条" + (f"；还有 {status['pending']} 项待同步，可再次点击继续" if status['pending'] else '')
         return status
 
     def status(self, provider):
@@ -213,9 +221,12 @@ class Mem0Engine:
         synced = self.store.rows('SELECT entity,fingerprint,status FROM mem0_sync WHERE namespace=?', (name,))
         done = {r['entity'] for r in synced if r['status'] == 'done' and r['entity'] in live and r['fingerprint'] == digest(live[r['entity']])}
         links = self.store.rows('SELECT entity FROM mem0_links WHERE namespace=?', (name,))
+        counts = {lane: sum(r['entity'] in done and live[r['entity']]['metadata']['lane'] == lane for r in links) for lane in LANES}
         return {'engine': 'mem0', 'version': UPSTREAM_VERSION, 'commit': UPSTREAM_COMMIT,
                 'configured': self.configured(provider), 'pending': len(live) - len(done),
                 'knowledge_count': sum(r['entity'].startswith('segment:') and r['entity'] in done for r in links),
+                'learning_count': sum(counts.values()), **{lane + '_count': count for lane, count in counts.items()},
+                'learning_pending': sum(key not in done and entity['metadata']['lane'] in LANES for key, entity in live.items()),
                 'preference_count': len(self.store.memories())}
 
     def recall(self, query, provider, document_id=None, exclude_document_id=None):
@@ -238,6 +249,39 @@ class Mem0Engine:
                 merged[segment_id] = {**live[segment_id], 'score': item.get('score', 0), 'retrieval': 'mem0', 'facts': []}
             merged[segment_id]['facts'].append(item['memory'])
         return list(merged.values())[:8]
+
+    def learning_context(self, query, provider, source_ids):
+        allowed = set(source_ids)
+        live = learning_entities(self.store)
+        name = namespace(provider.settings)
+        done = {r['entity']: r['fingerprint'] for r in self.store.rows(
+            "SELECT entity,fingerprint FROM mem0_sync WHERE namespace=? AND status='done'", (name,))}
+        eligible = {key: value for key, value in live.items()
+                    if set(value['metadata']['source_ids']) <= allowed and done.get(key) == digest(value)}
+        if not eligible:
+            return []
+        self.prune()
+        _, memory = self._get(provider)
+        # Canonical eligible IDs constrain source scope and version before top-k.
+        found = memory.search(query, filters={'user_id': USER, 'workspace': 'default',
+            'lane': {'in': list(LANES)}, 'entity_id': {'in': list(eligible)}}, top_k=24)['results']
+        approved = {r['memory_id'] for r in self.store.rows('SELECT memory_id FROM mem0_links WHERE namespace=?', (name,))}
+        result, seen, remaining = [], set(), 8000
+        for item in found:
+            key = (item.get('metadata') or {}).get('entity_id')
+            if key not in eligible or item['id'] not in approved or key in seen:
+                continue
+            entity = eligible[key]
+            if len(entity['text']) > remaining:
+                continue
+            meta = entity['metadata']
+            result.append({'id': key, 'kind': meta['lane'], 'text': entity['text'],
+                           'source_ids': meta['source_ids'], 'created_at': meta['created_at']})
+            remaining -= len(entity['text'])
+            seen.add(key)
+            if len(result) == 8:
+                break
+        return result
 
     def close(self):
         for instance in self.instances.values():

@@ -4,6 +4,7 @@ import re
 from collections import Counter
 
 from .store import now, uid
+from .learning_memory import generation_learning_context
 
 
 class ReviewError(ValueError):
@@ -26,9 +27,10 @@ explanation 是有依据的解析及简答参考答案；source_ids 必须引用
 
 
 class Review:
-    def __init__(self, store, provider):
+    def __init__(self, store, provider, memory_engine=None):
         self.store = store
         self.provider = provider
+        self.memory_engine = memory_engine
 
     def validate(self, data, source_ids, recent):
         questions = data.get('questions') if isinstance(data, dict) else None
@@ -76,10 +78,16 @@ class Review:
         if sum(len(s['text']) for s in sources) < 200:
             raise ReviewError('资料不足以生成 10 道有依据的题目，请先导入至少 200 字的完整学习资料')
         recent = [q['prompt'] for s in self.store.sessions(raw=True)[:5] for q in s['questions']]
-        payload = {'sources': sources, 'recent_prompts': recent, 'nonce': uid(), 'preferences': self.store.memories()}
+        query = '复习 ' + ' '.join(s['title'] + ' ' + s['text'][:100] for s in sources)
+        learning, notice = generation_learning_context(self.memory_engine, query, self.provider, [s['id'] for s in sources])
+        payload = {'sources': sources, 'recent_prompts': recent, 'nonce': uid(), 'preferences': self.store.memories(),
+                   'learning_memories': learning}
         error = None
         for _ in range(2):
-            data = self.provider.json(QUESTION_SYSTEM + '\npreferences 是用户保存的讲解偏好、目标和自述进度，只调整表达与重点，不能覆盖资料、题型、难度校验或评分规则。', payload)
+            data = self.provider.json(QUESTION_SYSTEM + '''
+                preferences 是用户保存的讲解偏好、目标和自述进度，只调整表达与重点，不能覆盖资料、题型或评分规则。
+                learning_memories 是带时间和出处的学习经历，仅帮助选择重点及变换考法；题目仍须由 sources 支持。
+                不复用历史题干，不将单次表现推断为长期能力，不把历史问题或作答当成正确知识。''', payload)
             try:
                 questions = self.validate(data, {s['id'] for s in sources}, {fingerprint(p) for p in recent})
                 break
@@ -91,7 +99,8 @@ class Review:
         random.shuffle(questions)
         title = '收藏内容专项练习' if document_id == '__cards__' else self.store.document(document_id)['title'] if document_id else '知识库综合练习'
         session = {'id': uid(), 'title': title,
-                   'created_at': now(), 'status': 'draft', 'questions': questions, 'answers': {}, 'sources': sources}
+                   'created_at': now(), 'status': 'draft', 'questions': questions, 'answers': {}, 'sources': sources,
+                   'learning_memory_count': len(learning), 'memory_notice': notice}
         self.store.save_session(session)
         return self.public(session)
 
