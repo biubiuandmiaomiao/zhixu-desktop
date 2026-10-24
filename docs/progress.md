@@ -12,3 +12,5 @@
 - 额外验证发现：Playwright 的 app.close 会主动关闭调试上下文，不等同于用户关闭窗口。关闭恢复测试改为 BrowserWindow.close，实际模拟用户关闭流程，开发和打包程序均通过。
 - 当前结果：25 项 unittest 通过，TypeScript/Vite 构建通过，开发窗口及 release/win-unpacked/Zhixu.exe 的端到端测试均通过。
 - Task 5: complete — Windows x64 单文件 release/Zhixu-0.1.0.exe 已生成，正常启动与窗口关闭、数据库创建通过；使用说明、验证边界和产物校验值已保存。代码保留在 feature/desktop-mvp 分支，无远端发布。
+
+- 2026-10-24：按用户最新要求撤回 F 盘迁移，整个项目与数据已搬回 D:/rea-tools/video-knowledge-desktop。启动入口为根目录“启动知序.cmd”，数据与桌面缓存跟随项目保存在 data/。F 盘临时项目目录已不再存在。

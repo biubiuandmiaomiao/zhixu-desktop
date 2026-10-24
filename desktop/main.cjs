@@ -4,6 +4,16 @@ const fs = require('node:fs');
 const path = require('node:path');
 const readline = require('node:readline');
 const { randomUUID } = require('node:crypto');
+const { resolvePaths } = require('./paths.cjs');
+
+const storagePaths = resolvePaths({ packaged: app.isPackaged, projectDirectory: path.resolve(__dirname, '..'),
+  executablePath: process.execPath, portableDirectory: process.env.PORTABLE_EXECUTABLE_DIR,
+  overrideDirectory: process.env.ZHIXU_DATA_DIR });
+fs.mkdirSync(storagePaths.stateDirectory, { recursive:true });
+app.setPath('userData', storagePaths.stateDirectory);
+app.setPath('sessionData', path.join(storagePaths.stateDirectory, 'session'));
+app.setPath('crashDumps', path.join(storagePaths.stateDirectory, 'crash-dumps'));
+app.setAppLogsPath(path.join(storagePaths.stateDirectory, 'logs'));
 
 let win, backend, dataDir, apiKey = '', closeReady = false, allowClose = false, closing = false;
 const pending = new Map();
@@ -58,7 +68,7 @@ function assertSender(event) {
 
 app.whenReady().then(async () => {
   if (!app.requestSingleInstanceLock()) return app.quit();
-  dataDir = process.env.ZHIXU_DATA_DIR || path.join(app.getPath('userData'), 'knowledge');
+  dataDir = storagePaths.dataDirectory;
   fs.mkdirSync(dataDir, { recursive: true });
   const secretPath = path.join(dataDir, 'credential.bin');
   try { if (fs.existsSync(secretPath)) apiKey = safeStorage.decryptString(fs.readFileSync(secretPath)); } catch {}

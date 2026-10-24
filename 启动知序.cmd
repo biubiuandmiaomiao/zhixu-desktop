@@ -1,11 +1,12 @@
 @echo off
 cd /d "%~dp0"
-if exist "release\Zhixu-0.1.0.exe" (
-  start "" "release\Zhixu-0.1.0.exe"
-  exit /b
-)
+set "ZHIXU_DATA_DIR=%~dp0data"
 if exist "release\win-unpacked\Zhixu.exe" (
   start "" "release\win-unpacked\Zhixu.exe"
+  exit /b
+)
+if exist "release\Zhixu-0.1.0.exe" (
+  start "" "release\Zhixu-0.1.0.exe"
   exit /b
 )
 call npm.cmd run build

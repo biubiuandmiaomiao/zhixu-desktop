@@ -25,7 +25,7 @@
 
 ## 数据与隐私
 
-默认数据目录为 `%APPDATA%/zhixu-desktop/knowledge`（以设置页面实际显示为准）。包含 SQLite 主库、可重建的 Qdrant 本地向量索引及加密凭据文件。备份请先关闭应用，再复制整个数据目录。环境变量 `ZHIXU_DATA_DIR` 可用于指定独立数据目录。
+整个项目位于 `D:/rea-tools/video-knowledge-desktop`，双击根目录的“启动知序.cmd”即可运行。默认数据目录为项目旁的 `data`，当前是 `D:/rea-tools/video-knowledge-desktop/data`。其中包含 SQLite 主库、可重建的 Qdrant 本地向量索引及加密凭据文件；桌面缓存与日志存放在 `data/app-state`。备份请先关闭应用，再复制整个数据目录。环境变量 `ZHIXU_DATA_DIR` 可用于指定独立数据目录，设置页面会显示实际位置。
 
 API Key 由 Electron `safeStorage` 使用 Windows 系统保护保存，不写入业务数据库或日志。在线生成、评分、问答及 Embedding 会将需要处理的内容发送给所配置的服务；本地保存不代表完全离线。Embedding 共用对话 API Key，应使用同一服务商或兼容网关。
 
