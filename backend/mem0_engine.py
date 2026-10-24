@@ -39,6 +39,8 @@ class Mem0Engine:
                 PRIMARY KEY(namespace,memory_id));
         ''')
         store.db.commit()
+        # Preferences now live only in SQLite. Remove old derived vectors offline.
+        self.remove([r['entity'] for r in store.rows("SELECT DISTINCT entity FROM mem0_sync WHERE entity LIKE 'personal:%'")])
 
     @staticmethod
     def configured(provider):
@@ -49,9 +51,6 @@ class Mem0Engine:
         for segment in self.store.segments():
             result['segment:' + segment['id']] = {'text': segment['title'] + '\n' + segment['text'],
                 'metadata': {'lane': 'knowledge', 'workspace': 'default', 'segment_id': segment['id'], 'document_id': segment['document_id']}}
-        for memory in self.store.memories():
-            result['personal:' + memory['id']] = {'text': memory['title'] + ': ' + memory['text'],
-                'metadata': {'lane': 'personal', 'workspace': 'default', 'personal_id': memory['id']}}
         return result
 
     def _open(self, name, dimensions, provider=None):
@@ -173,14 +172,12 @@ class Mem0Engine:
             for row in self.store.rows('SELECT namespace FROM mem0_sync WHERE entity=?', (entity,)):
                 self._clear(row['namespace'], entity)
 
-    def sync(self, provider, personal_only=False, limit=24):
+    def sync(self, provider, limit=24):
         deadline = time.monotonic() + 160
         name, memory = self._get(provider)
         self.prune()
         completed = 0
         for key, entity in self.entities().items():
-            if personal_only and not key.startswith('personal:'):
-                continue
             previous = self.store.rows('SELECT fingerprint,status FROM mem0_sync WHERE namespace=? AND entity=?', (name, key))
             fingerprint = digest(entity)
             if previous and previous[0]['status'] == 'done' and previous[0]['fingerprint'] == fingerprint:
@@ -207,7 +204,7 @@ class Mem0Engine:
                 self.store.db.execute("UPDATE mem0_sync SET status='done',updated_at=? WHERE namespace=? AND entity=?", (now(), name, key))
             completed += 1
         status = self.status(provider)
-        status['message'] = f"mem0 已同步 {completed} 项，知识事实 {status['knowledge_count']} 条，个人记忆 {status['personal_count']} 条" + (f"；还有 {status['pending']} 项待同步，可再次点击继续" if status['pending'] else '')
+        status['message'] = f"mem0 已同步 {completed} 项，知识事实 {status['knowledge_count']} 条" + (f"；还有 {status['pending']} 项待同步，可再次点击继续" if status['pending'] else '')
         return status
 
     def status(self, provider):
@@ -219,7 +216,7 @@ class Mem0Engine:
         return {'engine': 'mem0', 'version': UPSTREAM_VERSION, 'commit': UPSTREAM_COMMIT,
                 'configured': self.configured(provider), 'pending': len(live) - len(done),
                 'knowledge_count': sum(r['entity'].startswith('segment:') and r['entity'] in done for r in links),
-                'personal_count': sum(r['entity'].startswith('personal:') and r['entity'] in done for r in links)}
+                'preference_count': len(self.store.memories())}
 
     def recall(self, query, provider, document_id=None, exclude_document_id=None):
         name, memory = self._get(provider)
@@ -241,13 +238,6 @@ class Mem0Engine:
                 merged[segment_id] = {**live[segment_id], 'score': item.get('score', 0), 'retrieval': 'mem0', 'facts': []}
             merged[segment_id]['facts'].append(item['memory'])
         return list(merged.values())[:8]
-
-    def personal(self, query, provider):
-        self.sync(provider, personal_only=True)
-        name, memory = self._get(provider)
-        found = memory.search(query, filters={'user_id': USER, 'workspace': 'default', 'lane': 'personal'}, top_k=8)['results']
-        live = {m['id']: m for m in self.store.memories()}
-        return [live[i['metadata']['personal_id']] for i in found if (i.get('metadata') or {}).get('personal_id') in live]
 
     def close(self):
         for instance in self.instances.values():

@@ -82,14 +82,28 @@ class RealMem0Tests(unittest.TestCase):
         self.assertTrue(all(s['document_id'] != b['id'] for s in found))
         self.assertEqual(self.engine.status(self.provider)['knowledge_count'], 1)
 
-    def test_changed_preferences_use_active_version(self):
-        old = self.store.save_memory('讲解偏好', '先讲理论')
-        self.engine.sync(self.provider)
-        new = self.store.save_memory('讲解偏好', '先给例子')
-        self.engine.sync(self.provider)
-        found = self.engine.personal('如何讲解', self.provider)
-        self.assertTrue(any(m['id'] == new['id'] for m in found))
-        self.assertFalse(any(m['id'] == old['id'] for m in found))
+    def test_preferences_are_not_vector_sync_entities(self):
+        self.store.save_memory('讲解偏好', '先给例子')
+        self.assertEqual(self.engine.entities(), {})
+        self.assertEqual(self.engine.status(self.provider)['pending'], 0)
+
+    def test_upgrade_removes_legacy_personal_vectors_but_keeps_preferences(self):
+        from backend.mem0_engine import USER, digest
+        preference = self.store.save_memory('讲解偏好', '先给例子')
+        name, native = self.engine._get(self.provider)
+        key = 'personal:' + preference['id']
+        added = native.add('先给例子', user_id=USER, agent_id=key,
+                           metadata={'lane': 'personal', 'workspace': 'default'}, infer=False)
+        with self.store.db:
+            self.store.db.execute('INSERT INTO mem0_sync VALUES(?,?,?,?,?)', (name, key, digest(preference), 'done', 'old'))
+            for item in added['results']:
+                self.store.db.execute('INSERT INTO mem0_links VALUES(?,?,?)', (name, key, item['id']))
+        self.engine.close()
+        self.engine = Mem0Engine(self.store)
+        _, reopened = self.engine._get(self.provider)
+        self.assertEqual(reopened.get_all(filters={'user_id': USER, 'agent_id': key})['results'], [])
+        self.assertEqual(reopened.db.connection.execute('SELECT COUNT(*) FROM history').fetchone()[0], 0)
+        self.assertEqual(len(self.store.memories()), 1)
 
     def test_failed_model_is_retryable(self):
         self.add_sources()
