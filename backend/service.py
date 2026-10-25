@@ -4,6 +4,8 @@ from .review import Review
 from .store import Store
 from .vectors import VectorIndex
 from .mem0_engine import Mem0Engine
+from .media import MediaJobs
+from .exports import with_embedded_frames
 
 
 class Service:
@@ -12,8 +14,10 @@ class Service:
         self.store.recover_jobs()
         self.vectors = VectorIndex(self.store)
         self.mem0 = Mem0Engine(self.store)
+        self.media = MediaJobs(directory)
 
     def close(self):
+        self.media.close()
         self.mem0.close()
         self.vectors.close()
         self.store.close()
@@ -24,20 +28,56 @@ class Service:
         knowledge = Knowledge(self.store, provider, self.vectors, self.mem0)
         review = Review(self.store, provider, self.mem0)
         if action == 'bootstrap':
-            return {'documents': [{**d, 'content': d['content'][:180]} for d in self.store.documents()],
+            return {'documents': [{**d, 'content': d['content'][:180], 'notebook': self.store.notebook.metadata(d['id'])} for d in self.store.documents()],
                     'cards': self.store.cards(), 'memories': self.store.memories(), 'sessions': self.store.sessions(),
                     'relations': self.store.relations(), 'settings': self.store.settings(),
                     'conversations': self.store.conversations(), 'data_directory': str(self.store.directory),
                     'jobs': self.store.rows('SELECT id,kind,status,error,created_at FROM jobs ORDER BY created_at DESC LIMIT 5'),
-                    'mem0': self.mem0.status(provider)}
+                    'mem0': self.mem0.status(provider), 'media_jobs': self.media.status()}
         if action == 'document':
-            return {'document': self.store.document(args['id']), 'segments': self.store.segments(args['id']), 'relations': self.store.relations(args['id'])}
+            return {'document': self.store.document(args['id']), 'segments': self.store.segments(args['id']),
+                    'relations': self.store.relations(args['id']), 'notebook': self.store.notebook.metadata(args['id']),
+                    'assets': self.media.assets(args['id'])}
+        if action == 'resolve_note_link':
+            return self.store.notebook.resolve_link(args['id'], args['target'])
+        if action == 'note_graph':
+            return self.store.notebook.graph(min(200, max(1, int(args.get('limit', 100)))))
+        if action == 'note_versions':
+            return self.store.notebook.versions(args['id'], preview_chars=8000)
+        if action == 'restore_note_version':
+            self.mem0.remove_document(args['id'])
+            self.vectors.remove([s['id'] for s in self.store.segments(args['id'])])
+            result = self.store.notebook.restore_version(args['id'], args['version_id'])
+            self.mem0.prune()
+            return result
+        if action == 'toggle_note_bookmark':
+            return self.store.notebook.toggle_bookmark(args['id'])
+        if action == 'map_card_sources':
+            return self.store.notebook.map_card_sources(args['id'], args['source_ids'])
+        if action == 'export_document':
+            return {'content': with_embedded_frames(self.store.notebook.export_document(args['id']), self.media.assets(args['id']))}
+        # Paths arrive only through privileged native-dialog handlers, not renderer call().
+        if action == 'import_vault':
+            return self.store.notebook.import_vault(args['directory'])
+        if action == 'export_vault':
+            return self.store.notebook.export_vault(args['directory'], transform=lambda doc_id, text: with_embedded_frames(text, self.media.assets(doc_id)))
+        if action == 'import_local_media':
+            return self.media.start_local(args['path'], args.get('options'))
+        if action == 'start_video_job':
+            return self.media.start_video(args['url'], args.get('options'))
+        if action == 'media_jobs':
+            return self.media.status(args.get('id'))
+        if action == 'retry_media_job':
+            return self.media.retry(args['id'])
+        if action == 'cancel_media_job':
+            return self.media.cancel(args['id'])
         if action == 'import_text':
             return knowledge.import_text(args['title'], args['content'], args.get('url', ''), args.get('subtitle', False))
         if action == 'import_video':
             return knowledge.import_video(args['url'])
         if action == 'tutorial':
-            return knowledge.tutorial(args['id'])
+            images = self.media.assets(args['id']) if args.get('use_images') else []
+            return knowledge.tutorial(args['id'], args.get('style', 'tutorial'), images=images, use_images=bool(args.get('use_images')))
         if action == 'update_document':
             if self.store.document(args['id'])['kind'] == 'text':
                 self.mem0.remove_document(args['id'])
@@ -49,11 +89,12 @@ class Service:
             ids = [s['id'] for s in self.store.segments(args['id'])]
             self.mem0.remove_document(args['id'])
             self.vectors.remove(ids)
+            self.media.delete_document(args['id'])
             self.store.delete_document(args['id'])
             self.mem0.prune()
             return True
         if action == 'add_card':
-            return self.store.add_card(args['document_id'], redact(args['text']), args.get('segment_id'))
+            return self.store.add_card(args['document_id'], redact(args['text']), args.get('segment_id'), args.get('source_ids'))
         if action == 'delete_card':
             self.store.delete_card(args['id'])
             return True

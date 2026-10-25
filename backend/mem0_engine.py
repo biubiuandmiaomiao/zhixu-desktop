@@ -5,6 +5,7 @@ import math
 import os
 import sqlite3
 import time
+from threading import RLock
 
 from .provider import parse_json, redact
 from .store import now
@@ -15,6 +16,7 @@ os.environ['MEM0_TELEMETRY'] = 'False'
 UPSTREAM_VERSION = '2.2.1'
 UPSTREAM_COMMIT = 'b7ad69afda6b6ed030347c66d48a13e4de9dec08'
 USER = 'zhixu-local-user'
+_factory_lock = RLock()
 
 
 def namespace(settings):
@@ -68,6 +70,7 @@ class Mem0Engine:
         from mem0.configs.base import MemoryConfig
         from mem0.llms.base import LLMBase
         from mem0.embeddings.base import EmbeddingBase
+        from mem0.utils.factory import EmbedderFactory, LlmFactory
 
         class OnlineLLM(LLMBase):
             def __init__(self, provider):
@@ -108,16 +111,23 @@ class Mem0Engine:
 
         root = self.directory / name
         root.mkdir(parents=True, exist_ok=True)
-        # Standard constructors are used; real requests go through our transport adapters.
-        # Placeholder SDK clients never receive the user's credentials or perform requests.
+        # Native Memory owns the algorithm and stores; supply its transport factories
+        # directly so unused OpenAI SDK clients cannot parse unrelated proxy settings.
         config = MemoryConfig(
             llm={'provider': 'openai', 'config': {'api_key': 'adapter-managed', 'model': 'adapter-managed', 'openai_base_url': 'http://127.0.0.1:1/v1'}},
             embedder={'provider': 'openai', 'config': {'api_key': 'adapter-managed', 'model': 'adapter-managed', 'embedding_dims': dimensions, 'openai_base_url': 'http://127.0.0.1:1/v1'}},
             vector_store={'provider': 'qdrant', 'config': {'collection_name': 'zhixu_memories', 'embedding_model_dims': dimensions, 'path': str(root / 'vectors')}},
             history_db_path=str(root / 'history.sqlite3'))
-        instance = Memory(config)
-        instance.llm = OnlineLLM(provider)
-        instance.embedding_model = OnlineEmbedding(provider)
+        with _factory_lock:
+            original_llm = LlmFactory.__dict__['create']
+            original_embedding = EmbedderFactory.__dict__['create']
+            try:
+                LlmFactory.create = staticmethod(lambda *args, **kwargs: OnlineLLM(provider))
+                EmbedderFactory.create = staticmethod(lambda *args, **kwargs: OnlineEmbedding(provider))
+                instance = Memory(config)
+            finally:
+                LlmFactory.create = original_llm
+                EmbedderFactory.create = original_embedding
         self.instances[name] = instance
         return instance
 

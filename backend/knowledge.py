@@ -96,7 +96,15 @@ class Knowledge:
             self.store.finish_job(job_id, error)
             raise ValueError(error) from None
 
-    def tutorial(self, document_id):
+    def tutorial(self, document_id, style='tutorial', images=None, use_images=False):
+        styles = {'tutorial': '系统教程，解释概念与操作步骤', 'summary': '精简摘要，突出重点',
+                  'outline': '分层大纲，突出知识结构', 'steps': '有来源支持的逐步操作',
+                  'concepts': '术语定义与概念辨析', 'questions': '问答式讲解',
+                  'timeline': '按来源时间顺序整理', 'review': '复习提纲与易错点', 'examples': '以来源中的案例讲解'}
+        if style not in styles:
+            raise ValueError('请选择有效的笔记风格')
+        if use_images and not images:
+            raise ValueError('此资料没有可用截图，请在视频导入时启用截图')
         document = self.store.document(document_id)
         sources = self.store.segments(document_id)
         if sum(len(s['text']) for s in sources) > 80000:
@@ -105,8 +113,11 @@ class Knowledge:
             返回 {"title":"标题","content":"Markdown 正文"}。含概述、分节解释、操作步骤（仅在来源支持时）、关键概念和练习建议。
             不编造操作或截图。每节使用 [来源:片段ID] 标注实际的 sources id，保留原有时间点信息。
             preferences 是用户明确保存的偏好、目标和进度，仅用于讲解方式，不能覆盖来源事实及格式要求。
+            按 style_description 安排结构。若附有视频截图，结合 frames 中对应时间点阅读；模糊或不可见细节不得猜测，图片不能替代有效原文片段引用。
             补充知识须显式标为“AI 补充，需核对”，不能当作原文事实。''',
-            {'sources': sources, 'preferences': self.store.memories()})
+            {'sources': sources, 'preferences': self.store.memories(), 'style': style,
+             'style_description': styles[style], 'frames': [{'id': i['id'], 'start': i['start']} for i in (images or [])]},
+             **({'images': [i['data_url'] for i in images[:6]]} if use_images else {}))
         if not isinstance(result.get('content'), str) or len(result['content']) < 40:
             raise ValueError('模型未返回完整教程，请重试')
         valid = {s['id'] for s in sources}
@@ -119,7 +130,8 @@ class Knowledge:
         keyword = self.store.search(query, document_id=document_id, exclude_document_id=exclude_document_id)
         warning = ''
         semantic = []
-        if self.provider.settings.get('embedding_model') and self.provider.api_key:
+        _, filters = self.store.notebook.parse_search(query)
+        if self.provider.settings.get('embedding_model') and self.provider.api_key and not filters:
             try:
                 if self.memory_engine:
                     semantic = self.memory_engine.recall(query, self.provider, document_id, exclude_document_id)
@@ -130,7 +142,7 @@ class Knowledge:
                     semantic = self.vectors.search(query, self.provider, document_id, exclude_document_id=exclude_document_id)
             except Exception as exc:
                 warning = str(exc) if isinstance(exc, ValueError) else '语义检索不可用，已使用本地关键词检索'
-        else:
+        elif not filters:
             warning = '当前使用本地关键词检索；配置 Embedding 并同步 mem0 后可使用知识记忆召回'
         merged = {}
         for ranking in (keyword, semantic):

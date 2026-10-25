@@ -1,5 +1,16 @@
 # 预览版验证记录
 
+## 0.4：REA 对比与笔记 / 视频流程补齐（2026-10-25）
+
+- 123 项 Python 测试、5 项 Node 路径测试、依赖检查、TypeScript / Vite、PyInstaller 和 Windows 目录打包通过。
+- 开发和打包窗口的两套 smoke 均通过。新增安全 Markdown、块 / 标题链接与反链、标签 / 书签 / 键盘图谱、历史恢复、原生对话框文件夹往返和失效收藏修复；原 mem0 / 十题 / 答案隔离 / 草稿恢复 / 94 分评分 / 删除清理通过。
+- 真实 faster-whisper tiny CPU 转写和 FFmpeg 截图通过；打包测试去掉系统 FFmpeg 的 PATH 仍成功。模型缓存于 D 盘 `data/models`，新数据目录首次使用需下载公共模型。
+- 同名身份、删除墓碑、字幕回退、8.2 MB 中文导入、SQL 限长预览和 10,001 条字幕往返均有失败后通过的回归；实际打包后端的 10,001 段往返也通过。
+- REA 实际分析 BiliNote 2.4.5 包 / 隔离运行、Obsidian 1.14.5 ASAR 和知序前后 ASAR；新版六项窗口动作完成，但 hook_conflict，未获取 IPC 时间线。[对比报告](audits/2026-10-25-feature-parity.md) 记录完整边界。
+- 业务库备份 `data/backups/before-rea-parity-20261025-161629.sqlite3`。当前交付 0.4 目录版，旧 0.1 单文件保留；未生成 0.4 单文件。
+
+未用用户凭据验证真实在线模型或全部站点下载。外部模型响应为本机测试服务；Electron、mem0、Qdrant、SQLite、打包后端、转写和截图使用真实实现。
+
 ## 0.3：学习经历召回与直接读取偏好（2026-10-25）
 
 - 54 项 Python 测试、4 项桌面数据路径测试通过，`pip check` 通过；TypeScript / Vite、PyInstaller 后端及 Windows 目录打包通过。

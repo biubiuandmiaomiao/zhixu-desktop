@@ -1,6 +1,8 @@
 import hashlib
 import tempfile
 import unittest
+import os
+from unittest.mock import patch
 from pathlib import Path
 
 from backend.mem0_engine import Mem0Engine
@@ -86,6 +88,12 @@ class RealMem0Tests(unittest.TestCase):
         self.store.save_memory('讲解偏好', '先给例子')
         self.assertEqual(self.engine.entities(), {})
         self.assertEqual(self.engine.status(self.provider)['pending'], 0)
+
+    def test_native_adapter_does_not_construct_unused_sdk_proxy_clients(self):
+        self.add_sources()
+        with patch.dict(os.environ, {'NO_PROXY': '[::1]', 'no_proxy': '[::1]'}):
+            self.assertEqual(self.engine.sync(self.provider)['knowledge_count'], 2)
+            self.assertEqual(os.environ['NO_PROXY'], '[::1]')
 
     def test_upgrade_removes_legacy_personal_vectors_but_keeps_preferences(self):
         from backend.mem0_engine import USER, digest

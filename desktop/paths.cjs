@@ -15,4 +15,12 @@ function resolvePaths({ packaged, projectDirectory, executablePath, portableDire
   return { dataDirectory, stateDirectory: path.join(dataDirectory, 'app-state') };
 }
 
-module.exports = { resolvePaths };
+function resolveDataOverride(argv, environmentValue) {
+  const index = argv.findIndex(value => value === '--data-dir' || value.startsWith('--data-dir='));
+  if (index < 0) return environmentValue || undefined;
+  const value = argv[index].startsWith('--data-dir=') ? argv[index].slice(11) : argv[index + 1];
+  if (!value || value.startsWith('--') || value.includes('\0') || value.length > 4096) throw new Error('--data-dir 需要有效目录');
+  return value;
+}
+
+module.exports = { resolvePaths, resolveDataOverride };

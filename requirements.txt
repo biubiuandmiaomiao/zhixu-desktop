@@ -3,3 +3,4 @@ yt-dlp>=2026.1
 pyinstaller>=6.16,<7
 ./vendor/mem0
 openai>=1.90,<3
+faster-whisper==1.2.1

@@ -4,11 +4,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const readline = require('node:readline');
 const { randomUUID } = require('node:crypto');
-const { resolvePaths } = require('./paths.cjs');
+const { resolvePaths, resolveDataOverride } = require('./paths.cjs');
 
 const storagePaths = resolvePaths({ packaged: app.isPackaged, projectDirectory: path.resolve(__dirname, '..'),
   executablePath: process.execPath, portableDirectory: process.env.PORTABLE_EXECUTABLE_DIR,
-  overrideDirectory: process.env.ZHIXU_DATA_DIR });
+  overrideDirectory: resolveDataOverride(process.argv, process.env.ZHIXU_DATA_DIR) });
 fs.mkdirSync(storagePaths.stateDirectory, { recursive:true });
 app.setPath('userData', storagePaths.stateDirectory);
 app.setPath('sessionData', path.join(storagePaths.stateDirectory, 'session'));
@@ -19,7 +19,9 @@ let win, backend, dataDir, apiKey = '', closeReady = false, allowClose = false, 
 const pending = new Map();
 const allowed = new Set(['bootstrap','document','import_text','import_video','tutorial','update_document',
   'delete_document','add_card','delete_card','save_memory','delete_memory','related','set_relation',
-  'search','ask','generate_quiz','quiz','save_draft','submit_quiz','save_settings','test_model','build_index','sync_mem0']);
+  'search','ask','generate_quiz','quiz','save_draft','submit_quiz','save_settings','test_model','build_index','sync_mem0',
+  'resolve_note_link','note_graph','note_versions','restore_note_version','toggle_note_bookmark','map_card_sources','export_document',
+  'start_video_job','media_jobs','retry_media_job','cancel_media_job']);
 
 function rpc(action, args = {}) {
   return new Promise((resolve, reject) => {
@@ -95,7 +97,7 @@ app.whenReady().then(async () => {
     const result = await dialog.showOpenDialog(win, { title: '导入学习资料', properties: ['openFile'], filters: [{ name: '文本与字幕', extensions: ['md','txt','srt','vtt','json'] }] });
     if (result.canceled) return null;
     const filename = result.filePaths[0];
-    if (fs.statSync(filename).size > 8_000_000) throw new Error('文件过大，请拆分后导入');
+    if (fs.statSync(filename).size > 24_000_000) throw new Error('文件过大，请拆分后导入（含来源映射不超过 24 MB）');
     return { title: path.basename(filename, path.extname(filename)), content: fs.readFileSync(filename, 'utf8'), subtitle: ['.srt','.vtt','.json'].includes(path.extname(filename).toLowerCase()) };
   });
   ipcMain.handle('knowledge:export', async (event, documentId) => {
@@ -104,13 +106,32 @@ app.whenReady().then(async () => {
     const filename = data.document.title.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 100) + '.md';
     const result = await dialog.showSaveDialog(win, { defaultPath: filename, filters: [{ name: 'Markdown', extensions: ['md'] }] });
     if (result.canceled) return false;
-    fs.writeFileSync(result.filePath, data.document.content, 'utf8');
+    const exported = await rpc('export_document', { id: documentId });
+    fs.writeFileSync(result.filePath, exported.content, 'utf8');
     return true;
+  });
+  ipcMain.handle('knowledge:importVault', async event => {
+    assertSender(event);
+    const result = await dialog.showOpenDialog(win, { title:'导入 Markdown 笔记文件夹', properties:['openDirectory'] });
+    if (result.canceled) return null;
+    return rpc('import_vault', { directory:result.filePaths[0] });
+  });
+  ipcMain.handle('knowledge:exportVault', async event => {
+    assertSender(event);
+    const result = await dialog.showOpenDialog(win, { title:'导出 Markdown 笔记库（保留已有文件）', properties:['openDirectory','createDirectory'] });
+    if (result.canceled) return null;
+    return rpc('export_vault', { directory:result.filePaths[0] });
+  });
+  ipcMain.handle('knowledge:importMedia', async (event, options) => {
+    assertSender(event);
+    const result = await dialog.showOpenDialog(win, { title:'导入本地音视频', properties:['openFile'], filters:[{name:'视频和音频', extensions:['mp4','mkv','webm','mov','mp3','m4a','wav','flac','ogg']}] });
+    if (result.canceled) return null;
+    return rpc('import_local_media', { path:result.filePaths[0], options:options || {} });
   });
   ipcMain.handle('knowledge:openLink', async (event, value) => {
     assertSender(event);
     const url = new URL(value);
-    if (url.protocol !== 'https:' || url.username || url.password) throw new Error('只允许打开 HTTPS 网页');
+    if (!['https:','http:'].includes(url.protocol) || url.username || url.password) throw new Error('只允许打开普通 HTTP(S) 网页');
     await shell.openExternal(url.toString());
   });
   ipcMain.on('knowledge:closeReady', event => { assertSender(event); closeReady = true; });

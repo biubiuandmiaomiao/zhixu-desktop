@@ -76,6 +76,8 @@ class Store:
                 status TEXT NOT NULL, error TEXT NOT NULL, created_at TEXT NOT NULL);
         ''')
         self.db.commit()
+        from .notebook import Notebook
+        self.notebook = Notebook(self)
 
     def close(self):
         self.db.close()
@@ -92,7 +94,16 @@ class Store:
     def documents(self):
         return self.rows('SELECT * FROM documents WHERE workspace=? ORDER BY updated_at DESC,rowid DESC', ('default',))
 
-    def add_document(self, title, content, url='', kind='text', workspace='default', segments=None):
+    def add_document(self, title, content, url='', kind='text', workspace='default', segments=None, source_path='', on_saved=None, defer_links=False):
+        if on_saved is not None and not callable(on_saved):
+            raise ValueError('无效的资料保存回调')
+        portable = self.notebook.decode_portable(content) if isinstance(content, str) else None
+        original_id = ''
+        if portable:
+            title, content = portable['title'], portable['content']
+            url, kind, segments = portable.get('url', ''), portable['kind'], portable['segments']
+            source_path = source_path or portable.get('path', '')
+            original_id = portable.get('document_id', '')
         if not isinstance(title, str) or not title.strip() or not isinstance(content, str) or not content.strip():
             raise ValueError('请填写标题和资料内容')
         if len(content) > 2_000_000 or len(title) > 200:
@@ -102,10 +113,22 @@ class Store:
         with self.db:
             self.db.execute('INSERT INTO documents VALUES(?,?,?,?,?,?,?,?)',
                             (doc_id, workspace, title.strip(), content, url, kind, date, date))
+            mapping = {}
             for index, chunk in enumerate(chunks):
                 seg_id = uid()
+                if chunk.get('id'):
+                    mapping[chunk['id']] = seg_id
                 self.db.execute('INSERT INTO segments VALUES(?,?,?,?,?)', (seg_id, doc_id, chunk['text'], chunk.get('start'), index))
                 self.db.execute('INSERT INTO segment_fts VALUES(?,?)', (seg_id, ' '.join(tokens(title + ' ' + chunk['text']))))
+            if mapping:
+                self.db.execute('UPDATE documents SET content=? WHERE id=?', (self.notebook.rewrite_sources(content, mapping), doc_id))
+            if workspace == 'default':
+                self.notebook.added(doc_id, source_path=source_path, original_id=original_id, refresh=not defer_links,
+                                    bindings=portable.get('links') if portable else None)
+            if on_saved is not None:
+                # Callers may atomically attach media assets and finish their job;
+                # they must use this connection and must not commit themselves.
+                on_saved(doc_id)
         return dict(self.db.execute('SELECT * FROM documents WHERE id=?', (doc_id,)).fetchone())
 
     def segments(self, document_id=None):
@@ -122,40 +145,65 @@ class Store:
                     self.db.execute('DELETE FROM quizzes WHERE id=?', (session['id'],))
             self.db.executemany('DELETE FROM segment_fts WHERE id=?', [(i,) for i in ids])
             self.forget_conversations(document_id)
+            self.notebook.deleted(document_id)
             self.db.execute('DELETE FROM documents WHERE id=?', (document_id,))
+            self.notebook.refresh_links()
+
+    def invalidate_sources(self, document_id):
+        """Invalidate derived factual records before replacing active evidence."""
+        old_ids = {s['id'] for s in self.segments(document_id)}
+        for session in self.sessions(raw=True):
+            if any(old_ids.intersection(q['source_ids']) for q in session['questions']) or any(s['document_id'] == document_id for s in session.get('sources', [])):
+                self.db.execute('DELETE FROM quizzes WHERE id=?', (session['id'],))
+        self.forget_conversations(document_id)
+        self.db.execute("UPDATE relations SET status='suggested',reason='资料已修改，请重新核对。' || reason WHERE (a=? OR b=?) AND status='confirmed'", (document_id, document_id))
+
+    def replace_sources(self, document_id, sources, title):
+        old_ids = [s['id'] for s in self.segments(document_id)]
+        self.db.executemany('DELETE FROM segment_fts WHERE id=?', [(s,) for s in old_ids])
+        self.db.execute('DELETE FROM segments WHERE document_id=?', (document_id,))
+        mapping = {}
+        for position, source in enumerate(sources):
+            sid = uid()
+            if source.get('id'):
+                mapping[source['id']] = sid
+            self.db.execute('INSERT INTO segments VALUES(?,?,?,?,?)', (sid, document_id, source['text'], source.get('start'), position))
+            self.db.execute('INSERT INTO segment_fts VALUES(?,?)', (sid, ' '.join(tokens(title + ' ' + source['text']))))
+        return mapping
 
     def update_document(self, document_id, title, content, preserve_sources=False):
         doc = self.document(document_id)
         if not title.strip() or not content.strip() or len(content) > 2_000_000:
             raise ValueError('标题和正文不能为空，正文不超过 200 万字符')
         with self.db:
+            self.notebook.renamed(doc, title)
             if doc['kind'] == 'text' and not preserve_sources:
-                old_ids = {s['id'] for s in self.segments(document_id)}
-                for session in self.sessions(raw=True):
-                    if any(old_ids.intersection(q['source_ids']) for q in session['questions']) or any(s['document_id'] == document_id for s in session.get('sources', [])):
-                        self.db.execute('DELETE FROM quizzes WHERE id=?', (session['id'],))
-                self.db.executemany('DELETE FROM segment_fts WHERE id=?', [(i,) for i in old_ids])
-                self.db.execute('DELETE FROM segments WHERE document_id=?', (document_id,))
-                for position, offset in enumerate(range(0, len(content), 900)):
-                    seg_id, text = uid(), content[offset:offset + 900]
-                    self.db.execute('INSERT INTO segments VALUES(?,?,?,?,?)', (seg_id, document_id, text, None, position))
-                    self.db.execute('INSERT INTO segment_fts VALUES(?,?)', (seg_id, ' '.join(tokens(title + ' ' + text))))
-                self.forget_conversations(document_id)
-                self.db.execute("UPDATE relations SET status='suggested',reason='资料已修改，请重新核对。' || reason WHERE (a=? OR b=?) AND status='confirmed'", (document_id, document_id))
+                self.invalidate_sources(document_id)
+                self.replace_sources(document_id, [{'text': content[offset:offset + 900], 'start': None} for offset in range(0, len(content), 900)], title)
             kind = 'tutorial' if preserve_sources and doc['kind'] == 'text' else doc['kind']
             self.db.execute('UPDATE documents SET title=?, content=?, updated_at=?,kind=? WHERE id=?', (title, content, now(), kind, document_id))
+            self.notebook.updated(document_id)
         return self.document(document_id)
 
     def search(self, query, limit=8, document_id=None, exclude_document_id=None):
-        query_tokens = list(dict.fromkeys(tokens(query)))[:60]
-        if not query_tokens:
+        text, filters = self.notebook.parse_search(query)
+        admitted = self.notebook.search_document_ids(filters) if filters else None
+        if admitted == []:
+            return []
+        query_tokens = list(dict.fromkeys(tokens(text)))[:60]
+        if not query_tokens and not filters:
             return []
         expression = ' OR '.join('"' + t.replace('"', '""') + '"' for t in query_tokens)
         sql = '''SELECT s.*, d.title,d.url,d.kind, bm25(segment_fts) AS rank
                  FROM segment_fts JOIN segments s ON s.id=segment_fts.id
                  JOIN documents d ON d.id=s.document_id
-                 WHERE segment_fts MATCH ? AND d.workspace='default' '''
-        args = [expression]
+                 WHERE segment_fts MATCH ? AND d.workspace='default' ''' if query_tokens else '''
+                 SELECT s.*,d.title,d.url,d.kind,0 AS rank FROM segments s
+                 JOIN documents d ON d.id=s.document_id WHERE d.workspace='default' '''
+        args = [expression] if query_tokens else []
+        if admitted is not None:
+            sql += ' AND d.id IN (' + ','.join('?' for _ in admitted) + ')'
+            args.extend(admitted)
         if document_id:
             sql += ' AND d.id=?'
             args.append(document_id)
@@ -170,7 +218,7 @@ class Store:
             r['retrieval'] = '关键词'
         return rows
 
-    def add_card(self, document_id, text, segment_id=None):
+    def add_card(self, document_id, text, segment_id=None, source_ids=None):
         self.document(document_id)
         if not text.strip() or len(text) > 20000:
             raise ValueError('收藏内容不能为空或超过 2 万字符')
@@ -179,10 +227,11 @@ class Store:
         card_id = uid()
         with self.db:
             self.db.execute('INSERT INTO cards VALUES(?,?,?,?,?)', (card_id, document_id, segment_id, text.strip(), now()))
+            self.notebook.save_card_evidence(card_id, document_id, text.strip(), segment_id, source_ids)
         return next(c for c in self.cards() if c['id'] == card_id)
 
     def cards(self):
-        return self.rows('SELECT c.*,d.title FROM cards c JOIN documents d ON d.id=c.document_id ORDER BY c.created_at DESC')
+        return self.notebook.cards()
 
     def delete_card(self, card_id):
         with self.db:
@@ -242,18 +291,7 @@ class Store:
 
     def sample_sources(self, document_id=None, limit=12):
         if document_id == '__cards__':
-            all_segments = self.segments()
-            by_id = {s['id']: s for s in all_segments}
-            collected = {}
-            for card in self.cards():
-                segment = by_id.get(card['segment_id']) or next((s for s in all_segments if s['document_id'] == card['document_id'] and card['text'] in s['text']), None)
-                if not segment:
-                    continue
-                if segment['id'] not in collected:
-                    collected[segment['id']] = {**segment, 'text': card['text']}
-                elif card['text'] not in collected[segment['id']]['text']:
-                    collected[segment['id']]['text'] += '\n' + card['text']
-            sources = list(collected.values())
+            sources = self.notebook.favorite_sources()
         else:
             sources = self.segments(document_id)
         if not sources:

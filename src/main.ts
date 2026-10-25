@@ -1,4 +1,6 @@
 import './style.css';
+import { renderMarkdown, headingId } from './markdown';
+import { libraryTools, notebook, notebookAside, screenshotGallery, mediaJobs, graphView, featureModal } from './notebook-ui';
 
 type Row = Record<string, any>;
 declare global {
@@ -6,6 +8,9 @@ declare global {
     call(action: string, args?: Row): Promise<any>;
     saveCredential(value: string): Promise<any>;
     importFile(): Promise<Row | null>;
+    importVault(): Promise<Row | null>;
+    exportVault(): Promise<Row | null>;
+    importMedia(options?:Row): Promise<Row | null>;
     exportDocument(id: string): Promise<boolean>;
     openLink(url: string): Promise<void>;
     onClosing(callback: () => void): void;
@@ -16,7 +21,8 @@ declare global {
 const api = window.knowledge;
 const root = document.querySelector<HTMLDivElement>('#app')!;
 const state: Row = { view: 'library', data: null, selected: null, detail: null, busy: '', modal: '',
-  quiz: null, question: 0, search: '', results: null, answer: null, askScope: '', sourceTab: false };
+  quiz: null, question: 0, search: '', results: null, answer: null, askScope: '', sourceTab: false,
+  tagFilter: '', bookmarkFilter: false, graph: null, jobs: [] };
 let draftTimer: ReturnType<typeof setTimeout> | undefined;
 const escape = (x: unknown) => String(x ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 const e = escape;
@@ -46,17 +52,7 @@ const button = (action: string, text: string, cls = 'button', attrs = '') => `<b
 const empty = (title: string, text: string, action = '', label = '') => `<div class="empty"><span class="empty-icon">${icon('leaf')}</span><h3>${title}</h3><p>${text}</p>${action ? button(action, label, 'button primary') : ''}</div>`;
 
 function markdown(text: string) {
-  let code = false;
-  return text.split('\n').map(line => {
-    if (line.startsWith('```')) { code = !code; return ''; }
-    if (code) return `<div class="code-line">${e(line) || ' '}</div>`;
-    const heading = /^(#{1,4})\s+(.*)/.exec(line);
-    if (heading) return `<h${heading[1].length + 1}>${e(heading[2])}</h${heading[1].length + 1}>`;
-    if (!line.trim()) return '<div class="paragraph-gap"></div>';
-    const rendered = e(line).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/`([^`]+)`/g, '<code>$1</code>');
-    if (/^[-*]\s/.test(line)) return `<p class="bullet">${rendered.slice(2)}</p>`;
-    return `<p>${rendered}</p>`;
-  }).join('');
+  return renderMarkdown(text,{documentId:state.selected,sources:state.detail?.segments || [],assets:state.detail?.assets || []});
 }
 
 function toast(message: string, error = false) {
@@ -69,6 +65,7 @@ function toast(message: string, error = false) {
 
 async function refresh() {
   state.data = await api.call('bootstrap');
+  state.jobs = state.data.media_jobs || state.jobs || [];
   const live = new Set(state.data.documents.map((d: Row) => d.id));
   if (state.quiz && !state.data.sessions.some((s: Row) => s.id === state.quiz.id)) state.quiz = null;
   if (state.answer?.citations?.some((s: Row) => !live.has(s.document_id))) state.answer = null;
@@ -85,21 +82,24 @@ async function work(label: string, fn: () => Promise<void>) {
 function nav() {
   const d = state.data;
   const items = [['library', 'book', '知识库', d.documents.length], ['cards', 'star', '我的收藏', d.cards.length],
-    ['relations', 'link', '知识关联', d.relations.filter((r: Row) => r.status === 'confirmed').length],
+    ['relations', 'link', '知识关联', d.relations.filter((r: Row) => r.status === 'confirmed').length], ['graph', 'link', '引用图谱', ''],
     ['ask', 'chat', '知识问答', ''], ['review', 'quiz', '复习与题库', d.sessions.length], ['memory', 'brain', '长期记忆', d.memories.length]];
   return `<aside class="sidebar"><div class="brand"><span class="brand-mark">${icon('leaf')}</span><div>知序<small>ZHIXU · YOUR LEARNING SPACE</small></div></div>
     ${button('new', icon('plus') + ' 导入学习资料', 'button primary add-button')}
     <div class="nav-label">我的学习空间</div><nav>${items.map(([view, ico, label, count]) => `<button data-action="nav" data-view="${view}" class="nav-item ${state.view === view ? 'active' : ''}">${icon(String(ico))}<span>${label}</span>${count !== '' ? `<small>${count}</small>` : ''}</button>`).join('')}</nav>
-    <div class="sidebar-bottom"><div class="local-badge"><i></i> 本地知识库 <span>只属于你</span></div><button data-action="nav" data-view="settings" class="nav-item ${state.view === 'settings' ? 'active' : ''}">${icon('gear')}<span>模型与设置</span></button><div class="version">知序 · Windows 预览版 0.3</div></div></aside>`;
+    <div class="sidebar-bottom"><div class="local-badge"><i></i> 本地知识库 <span>只属于你</span></div><button data-action="nav" data-view="settings" class="nav-item ${state.view === 'settings' ? 'active' : ''}">${icon('gear')}<span>模型与设置</span></button><div class="version">知序 · Windows 预览版 0.4</div></div></aside>`;
 }
 
 function library() {
   if (state.detail) return detail();
   const d = state.data;
+  const docs = d.documents.filter((doc: Row) => (!state.bookmarkFilter || notebook(doc).bookmarked) && (!state.tagFilter || (notebook(doc).tags || []).some((tag: string) => tag === state.tagFilter || tag.startsWith(state.tagFilter + '/'))));
   return `<div class="welcome"><div><div class="eyebrow">LEARN · CONNECT · REMEMBER</div><h1>让知识，在这里生长<span>。</span></h1><p>把看过的教程，连接成自己的知识。</p></div><div class="welcome-art"><span class="orbit one"></span><span class="orbit two"></span><span class="art-icon">${icon('leaf')}</span><small>每一份理解，都有迹可循</small></div></div>
     <div class="stats">${[['book', d.documents.length, '份学习资料'], ['star', d.cards.length, '条知识收藏'], ['link', d.relations.filter((r: Row) => r.status === 'confirmed').length, '个已确认关联'], ['quiz', d.sessions.filter((s: Row) => s.status === 'completed').length, '次完成复习']].map(([ico, count, label]) => `<div class="stat"><span>${icon(String(ico))}</span><strong>${count}</strong><small>${label}</small></div>`).join('')}</div>
-    <div class="section-title"><h2>我的知识库 <span>${d.documents.length}</span></h2>${button('new', icon('plus') + ' 添加资料', 'button subtle')}</div>
-    ${d.documents.length ? `<div class="document-grid">${d.documents.map((doc: Row, i: number) => `<button class="document-card" data-action="document" data-id="${doc.id}"><div class="document-top"><span class="document-icon tone-${i % 3}">${icon(doc.url ? 'play' : 'book')}</span><span class="pill">${({ text: '文本笔记', subtitle: '视频字幕', tutorial: 'AI 教程' } as Row)[doc.kind] || '学习资料'}</span></div><h3>${e(doc.title)}</h3><p>${e(doc.content.replace(/[#*`]/g, '').slice(0, 100))}</p><div class="document-footer"><span>${date(doc.updated_at)} 更新</span>${icon('arrow')}</div></button>`).join('')}</div>` : empty('第一份知识，从这里开始', '导入 B 站视频字幕、Markdown 或文本，开始建立自己的学习资料库。', 'new', '导入第一份资料')}
+    <div id="media-jobs-region">${mediaJobs(state.jobs)}</div>
+    <div class="section-title"><h2>我的知识库 <span>${docs.length}${docs.length !== d.documents.length ? ' / ' + d.documents.length : ''}</span></h2>${button('new', icon('plus') + ' 添加资料', 'button subtle')}</div>
+    ${libraryTools(d, state.tagFilter, state.bookmarkFilter)}
+    <div id="library-documents">${docs.length ? `<div class="document-grid">${docs.map((doc: Row, i: number) => `<button class="document-card" data-action="document" data-id="${e(doc.id)}"><div class="document-top"><span class="document-icon tone-${i % 3}">${icon(doc.url ? 'play' : 'book')}</span><span class="pill">${notebook(doc).bookmarked ? '★ 书签 · ' : ''}${({ text: '文本笔记', subtitle: '视频字幕', tutorial: 'AI 教程' } as Row)[doc.kind] || '学习资料'}</span></div><h3>${e(doc.title)}</h3><p>${e(doc.content.replace(/[#*`]/g, '').slice(0, 100))}</p><div class="document-tags">${(notebook(doc).tags || []).slice(0,4).map((tag: string) => `<span>#${e(tag)}</span>`).join('')}</div><div class="document-footer"><span>${date(doc.updated_at)} 更新</span>${icon('arrow')}</div></button>`).join('')}</div>` : d.documents.length ? empty('没有符合筛选条件的笔记', '清除标签或书签筛选以查看其他资料。', 'clear-filters', '清除筛选') : empty('第一份知识，从这里开始', '导入公开视频、本地音视频、Markdown 或文本，开始建立自己的学习资料库。', 'new', '导入第一份资料')}</div>
     <div class="tip-card">${icon('link')}<div><strong>知识之间，也会相互照亮</strong><p>打开一份资料，发现相关教程；确认关联后，问答时能一起查阅。</p></div>${button('nav', '了解知识关联 ' + icon('arrow'), 'button text-button', 'data-view="relations"')}</div>`;
 }
 
@@ -107,15 +107,15 @@ function detail() {
   const { document: doc, segments, relations } = state.detail;
   const active = relations.filter((r: Row) => r.status !== 'rejected');
   return `<div class="breadcrumb">${button('back-library', '← 我的知识库', 'button text-button')}<span>/</span><span>${e(doc.title)}</span></div>
-    <div class="page-heading"><div><div class="eyebrow">YOUR KNOWLEDGE, WITH SOURCES</div><h1>${e(doc.title)}</h1><p>${date(doc.updated_at)} 更新 · ${segments.length} 个来源片段 · 选中文字可收藏</p></div><div class="toolbar">${button('edit', '编辑')}${button('export', '导出')}${button('delete-document', '删除', 'button danger-quiet')}</div></div>
+    <div class="page-heading"><div><div class="eyebrow">YOUR KNOWLEDGE, WITH SOURCES</div><h1>${e(doc.title)}</h1><p>${date(doc.updated_at)} 更新 · ${segments.length} 个来源片段 · 选中文字可收藏</p></div><div class="toolbar">${button('toggle-note-bookmark', state.detail.notebook?.bookmarked ? '★ 已加书签' : '☆ 笔记书签')}${button('edit', '编辑')}${button('versions', '版本历史')}${button('export', '导出')}${button('delete-document', '删除', 'button danger-quiet')}</div></div>
     <div class="reading-layout"><section class="paper"><div class="paper-tabs">${button('tab-tutorial', '教程正文', `tab ${!state.sourceTab ? 'active' : ''}`)}${button('tab-source', '来源片段', `tab ${state.sourceTab ? 'active' : ''}`)}<span></span>${button('bookmark', icon('star') + ' 收藏选中内容', 'button subtle')}</div>
       ${state.sourceTab ? `<div class="source-list">${segments.map((s: Row, i: number) => `<div class="source-block" id="source-${s.id}"><div><span class="pill">来源 ${i + 1}${s.start != null ? ` · ${Math.floor(s.start / 60)}:${String(Math.floor(s.start % 60)).padStart(2, '0')}` : ''}</span>${s.url ? button('source-video', '跳转视频 ↗', 'button text-button', `data-url="${e(s.url)}" data-time="${s.start || 0}"`) : ''}</div><p>${e(s.text)}</p>${button('bookmark-segment', '收藏此段', 'button text-button', `data-id="${s.id}"`)}</div>`).join('')}</div>` : `<article id="reading-content" class="prose">${markdown(doc.content)}</article>`}</section>
-      <aside class="context-panel"><div class="context-box"><span class="mini-icon">${icon('link')}</span><h3>与这份资料相关</h3><p>跨过课程边界，连接同一份理解。</p><div class="stack-actions">${button('related-local', '发现关键词关联', 'button')}${button('related-ai', 'AI 分析关联', 'button primary')}</div>${active.map((r: Row) => `<div class="related-mini"><span class="pill">${relationNames[r.kind]}</span><button class="inline-title" data-action="document" data-id="${r.a === doc.id ? r.b : r.a}">${e(r.a === doc.id ? r.b_title : r.a_title)} ↗</button><p>${e(r.reason)}</p>${relationSources(r)}${r.status === 'suggested' ? `${button('confirm-relation', '确认关联', 'button tiny', `data-id="${r.id}"`)} ${button('reject-relation', '忽略', 'button text-button tiny', `data-id="${r.id}"`)}` : '<span class="confirmed">✓ 已确认</span>'}</div>`).join('') || '<div class="mini-empty">发现关联后，会在这里展示具体原因。</div>'}</div>
-      <div class="context-box mint"><h3>把理解再向前一步</h3><p>围绕这份资料提问，或用十道题检验掌握情况。</p>${button('ask-current', icon('chat') + ' 问问这份资料', 'button full')}${button('review-current', icon('quiz') + ' 开始十题练习', 'button full')}${button('generate-tutorial', 'AI 整理为教程', 'button text-button full')}</div></aside></div>`;
+      <aside class="context-panel">${notebookAside(state.detail)}<div class="context-box"><span class="mini-icon">${icon('link')}</span><h3>与这份资料相关</h3><p>跨过课程边界，连接同一份理解。</p><div class="stack-actions">${button('related-local', '发现关键词关联', 'button')}${button('related-ai', 'AI 分析关联', 'button primary')}</div>${active.map((r: Row) => `<div class="related-mini"><span class="pill">${relationNames[r.kind]}</span><button class="inline-title" data-action="document" data-id="${r.a === doc.id ? r.b : r.a}">${e(r.a === doc.id ? r.b_title : r.a_title)} ↗</button><p>${e(r.reason)}</p>${relationSources(r)}${r.status === 'suggested' ? `${button('confirm-relation', '确认关联', 'button tiny', `data-id="${r.id}"`)} ${button('reject-relation', '忽略', 'button text-button tiny', `data-id="${r.id}"`)}` : '<span class="confirmed">✓ 已确认</span>'}</div>`).join('') || '<div class="mini-empty">发现关联后，会在这里展示具体原因。</div>'}</div>
+      <div class="context-box mint"><h3>把理解再向前一步</h3><p>围绕这份资料提问，或用十道题检验掌握情况。</p>${button('ask-current', icon('chat') + ' 问问这份资料', 'button full')}${button('review-current', icon('quiz') + ' 开始十题练习', 'button full')}${button('generate-tutorial', 'AI 整理为教程', 'button text-button full')}</div></aside></div>${screenshotGallery(state.detail.assets || [])}`;
 }
 
 function cards() {
-  return `<div class="page-heading"><div class="eyebrow">KEEP WHAT MATTERS</div><h1>我的收藏</h1><p>留下值得反复理解的一句话、一段解释。</p></div>${state.data.cards.length ? `<div class="cards-grid">${state.data.cards.map((c: Row) => `<div class="note-card"><span class="mini-icon">${icon('star')}</span><p class="card-quote">${e(c.text)}</p><div class="note-source">来自 ${e(c.title)}</div><div class="toolbar">${button('document', '回到资料 ↗', 'button text-button', `data-id="${c.document_id}"`)}${button('delete-card', '移除', 'button text-button muted', `data-id="${c.id}"`)}</div></div>`).join('')}</div>` : empty('收藏属于你的理解', '打开一份资料，选中内容后点击“收藏选中内容”，或在来源页收藏整段。', 'nav', '去知识库')}`;
+  return `<div class="page-heading"><div class="eyebrow">KEEP WHAT MATTERS</div><h1>我的收藏</h1><p>留下值得反复理解的一句话、一段解释。来源已更新的收藏会保留快照，重新确认出处后才能用于复习。</p></div>${state.data.cards.length ? `<div class="cards-grid">${state.data.cards.map((c: Row) => `<div class="note-card" data-card-id="${e(c.id)}"><span class="mini-icon">${icon('star')}</span><p class="card-quote">${e(c.text)}</p><div class="note-source">来自 ${e(c.title)}<span class="pill ${c.stale || c.unmapped ? 'amber' : 'green'}">${c.stale ? '来源已更新 · 待重选' : c.unmapped ? '尚未确认原文出处' : `${(c.source_ids || []).length} 个有效原文出处`}</span>${(c.source_snapshots || []).length ? `<details class="source-snapshots"><summary>${c.stale ? '查看保存时的原文快照' : '查看原文出处'}</summary>${c.source_snapshots.map((s: Row) => `<p>${e(s.text)}</p>`).join('')}</details>` : ''}</div><div class="toolbar">${button('document', '回到资料 ↗', 'button text-button', `data-id="${e(c.document_id)}"`)}${button('map-card-sources', '重新选择出处', 'button text-button', `data-id="${e(c.id)}"`)}${button('delete-card', '移除', 'button text-button muted', `data-id="${e(c.id)}"`)}</div></div>`).join('')}</div>` : empty('收藏属于你的理解', '打开一份资料，选中内容后点击“收藏选中内容”，或在来源页收藏整段。', 'nav', '去知识库')}`;
 }
 
 function relationSources(relation: Row) {
@@ -175,7 +175,7 @@ function settingsView() {
   return `<div class="page-heading"><div class="eyebrow">YOUR MODELS, YOUR KNOWLEDGE</div><h1>模型与设置</h1><p>使用你自己的在线 AI 服务。知识保存在本地，需要处理的片段会发送给所配置的服务。</p></div>
     <div class="settings-layout"><form id="settings-form" class="settings-card"><h2>对话与生成模型</h2><label for="base-url">兼容 API 地址（包含 /v1 等前缀）</label><input id="base-url" name="base_url" type="url" placeholder="https://你的服务地址/v1" value="${e(s.base_url || '')}" required/><label for="model">对话模型名称</label><input id="model" name="model" placeholder="填写服务商提供的准确模型 ID" value="${e(s.model || '')}" required/><label for="api-key">API Key ${state.data.has_api_key ? '<span class="confirmed">· 已加密保存</span>' : ''}</label><input id="api-key" name="api_key" type="password" autocomplete="new-password" placeholder="${state.data.has_api_key ? '留空保留现有密钥' : '输入你的 API Key'}"/>
     <div class="form-divider"></div><h2>语义检索 <span class="pill">可选</span></h2><p>未配置时仍可使用本地关键词搜索。mem0 从原文提取知识并存入本地。首次配置或导入新资料后，请同步记忆；未配置时可使用关键词搜索。</p><label for="embedding-model">Embedding 模型名称</label><input id="embedding-model" name="embedding_model" value="${e(s.embedding_model || '')}" placeholder="填写支持中文的 Embedding 模型 ID"/><label for="embedding-url">Embedding API 地址</label><input id="embedding-url" name="embedding_url" type="url" value="${e(s.embedding_url || '')}" placeholder="留空使用上面的 API 地址"/><p class="small-note">Embedding 与对话共用此 API Key，请填写同一服务商或兼容网关的地址。</p><div class="toolbar"><button type="submit" class="button primary">保存设置</button>${button('test-model', '测试已保存的连接')}${button('build-index', '同步 mem0 记忆')}</div></form>
-    <aside><div class="context-box"><h3>记忆引擎 · mem0 ${e(state.data.mem0.version)}</h3><p>${state.data.mem0.knowledge_count} 条知识事实<br>${state.data.mem0.relation_count} 条已确认关联 · ${state.data.mem0.review_count} 条复习观察 · ${state.data.mem0.conversation_count} 条历史提问<br>${state.data.mem0.pending} 项资料或学习记录待同步</p><p>问答、出题前自动同步学习记录；新资料请点击同步。需要对话模型与 Embedding 模型，使用当前 API Key。</p><p>${state.data.mem0.preference_count} 条个人设置在生成前直接读取，不使用向量索引。</p></div><div class="context-box"><h3>数据留在你的电脑</h3><p>教程、收藏、题库和记忆保存在：</p><code class="data-path">${e(state.data.data_directory)}</code><p>密钥使用系统加密保存。关闭应用后数据仍保留。</p>${state.data.has_api_key ? button('remove-key', '移除已保存的 API Key', 'button danger-quiet') : ''}</div><div class="context-box"><h3>关于当前版本</h3><p>支持文本、Markdown、SRT / VTT / B 站字幕 JSON。B 站自动导入依赖视频提供可获取的字幕。</p><p>当前没有音频转写或截图提取。简答评分由 AI 辅助，适合学习反馈。</p></div></aside></div>`;
+    <aside><div class="context-box"><h3>记忆引擎 · mem0 ${e(state.data.mem0.version)}</h3><p>${state.data.mem0.knowledge_count} 条知识事实<br>${state.data.mem0.relation_count} 条已确认关联 · ${state.data.mem0.review_count} 条复习观察 · ${state.data.mem0.conversation_count} 条历史提问<br>${state.data.mem0.pending} 项资料或学习记录待同步</p><p>问答、出题前自动同步学习记录；新资料请点击同步。需要对话模型与 Embedding 模型，使用当前 API Key。</p><p>${state.data.mem0.preference_count} 条个人设置在生成前直接读取，不使用向量索引。</p></div><div class="context-box"><h3>数据留在你的电脑</h3><p>教程、收藏、题库和记忆保存在：</p><code class="data-path">${e(state.data.data_directory)}</code><p>密钥使用系统加密保存。关闭应用后数据仍保留。</p>${state.data.has_api_key ? button('remove-key', '移除已保存的 API Key', 'button danger-quiet') : ''}</div><div class="context-box"><h3>关于当前版本</h3><p>支持文本、Markdown 笔记库、SRT / VTT / B 站字幕 JSON，以及本地音视频。公开视频优先使用可用字幕，无字幕时尝试本地转写。</p><p>支持本地音视频转写、公开直达视频链接和受管理截图；任务进度在知识库显示。简答评分由 AI 辅助，适合学习反馈。</p></div></aside></div>`;
 }
 
 function searchView() {
@@ -184,9 +184,12 @@ function searchView() {
 
 function modal() {
   if (!state.modal) return '';
-  let content = '';
-  if (state.modal === 'new') content = `<div class="modal-heading"><div><span class="eyebrow">ADD TO YOUR KNOWLEDGE</span><h2>导入学习资料</h2></div>${button('close-modal', icon('close'), 'icon-button', 'aria-label="关闭"')}</div><div class="import-methods">${button('import-file', icon('book') + ' 选择文本 / 字幕文件', 'button')}${button('video-modal', icon('play') + ' 从 B 站链接导入', 'button')}</div><form id="import-form"><label for="import-title">资料标题</label><input id="import-title" name="title" placeholder="例如：Python 闭包与装饰器" required maxlength="200"/><label for="import-content">粘贴文本或 Markdown</label><textarea id="import-content" name="content" placeholder="把想保存的知识放进来……" required></textarea><div class="modal-footer"><small>本地保存 · 可搜索 · 可关联 · 可复习</small><button type="submit" class="button primary">保存到知识库</button></div></form>`;
-  if (state.modal === 'video') content = `<div class="modal-heading"><h2>导入 B 站视频</h2>${button('close-modal', icon('close'), 'icon-button', 'aria-label="关闭"')}</div><p class="muted">获取可用字幕后保存到知识库，再按需生成教程。无可用字幕时可手动导入字幕文件。</p><form id="video-form"><label for="video-url">完整视频链接</label><input id="video-url" name="url" type="url" placeholder="https://www.bilibili.com/video/BV…" required/><div class="modal-footer"><small>仅获取字幕，当前没有音频转写</small><button class="button primary" type="submit">获取字幕并导入</button></div></form>`;
+  let content = featureModal(state);
+  if (state.modal === 'new') content = `<div class="modal-heading"><div><span class="eyebrow">ADD TO YOUR KNOWLEDGE</span><h2>导入学习资料</h2></div>${button('close-modal', icon('close'), 'icon-button', 'aria-label="关闭"')}</div><div class="import-methods">${button('import-file', icon('book') + ' 选择文本 / 字幕文件', 'button')}${button('video-modal', icon('play') + ' 从视频链接导入', 'button')}${button('local-media-modal', '本地音视频', 'button')}${button('import-vault', 'Markdown 文件夹', 'button')}</div><form id="import-form"><label for="import-title">资料标题</label><input id="import-title" name="title" placeholder="例如：Python 闭包与装饰器" required maxlength="200"/><label for="import-content">粘贴文本或 Markdown</label><textarea id="import-content" name="content" placeholder="把想保存的知识放进来……" required></textarea><div class="modal-footer"><small>本地保存 · 可搜索 · 可关联 · 可复习</small><button type="submit" class="button primary">保存到知识库</button></div></form>`;
+  if (state.modal === 'video' || state.modal === 'local-media') {
+    const local = state.modal === 'local-media';
+    content = `<div class="modal-heading"><h2>${local ? '导入本地音视频' : '导入公开直达视频'}</h2>${button('close-modal', icon('close'), 'icon-button', 'aria-label="关闭"')}</div><p class="muted">${local ? '通过系统文件选择器读取本地视频或音频；可用字幕优先，没有字幕时使用本地转写。' : '支持 B 站 BV、YouTube、抖音 /video/ 和快手 /short-video/ 的公开直达链接。'}</p><form id="${local ? 'local-media-form' : 'video-form'}">${local ? '' : '<label for="video-url">公开视频链接或 BV 号</label><input id="video-url" name="url" type="text" placeholder="BV… 或 https://www.bilibili.com/video/BV…" required maxlength="8000"/>'}<label for="media-title">资料标题（可选）</label><input id="media-title" name="title" maxlength="200" placeholder="自动使用视频标题"/><label for="media-language">转写语言</label><select id="media-language" name="language"><option value="auto">自动检测</option><option value="zh">中文</option><option value="en">英语</option><option value="ja">日语</option></select><label class="checkbox-label"><input type="checkbox" name="screenshots" checked/> 提取视频时间点截图</label><p class="small-note">导入在后台运行，可查看进度、取消和失败重试。受限、需登录或不可访问的视频会显示真实错误。</p><div class="modal-footer"><small>${local ? '本地模型首次转写可能需要下载' : '不接受短链、播放列表或登录凭据'}</small><button class="button primary" type="submit">${local ? '选择文件并开始导入' : '开始后台导入'}</button></div></form>`;
+  }
   if (state.modal === 'memory') {
     const m = state.editMemory || {};
     content = `<div class="modal-heading"><h2>${m.id ? '更正记忆' : '添加长期记忆'}</h2>${button('close-modal', icon('close'), 'icon-button', 'aria-label="关闭"')}</div><form id="memory-form"><label for="memory-kind">记忆类型</label><select id="memory-kind" name="kind">${[['preference','讲解偏好'],['goal','学习目标'],['progress','学习进度']].map(([v,l]) => `<option value="${v}" ${m.kind === v ? 'selected' : ''}>${l}</option>`).join('')}</select><label for="memory-title">标题（同名会替代旧版本）</label><input id="memory-title" name="title" value="${e(m.title || '')}" required ${m.id ? 'readonly' : ''}/><label for="memory-text">希望助手记住什么</label><textarea id="memory-text" name="text" required maxlength="8000" placeholder="例如：讲解代码时先给一个最小可运行的例子。">${e(m.text || '')}</textarea><div class="modal-footer"><small>用于后续问答，随时可以删除</small><button class="button primary" type="submit">保存记忆</button></div></form>`;
@@ -204,12 +207,37 @@ function modal() {
 
 function render() {
   if (!state.data) { root.innerHTML = '<div class="loading-screen">知序<span>正在打开你的学习空间……</span></div>'; return; }
-  const views: Record<string, () => string> = { library, cards, relations: relationView, ask: askView, review: reviewView, memory: memoryView, settings: settingsView, search: searchView };
-  root.innerHTML = `${nav()}<main><header class="topbar"><span class="workspace-name">个人空间 <small>/ ${({ library: '知识库', cards: '我的收藏', relations: '知识关联', ask: '知识问答', review: '复习与题库', memory: '长期记忆', settings: '设置', search: '搜索' } as Row)[state.view]}</small></span><form id="search-form" class="global-search">${icon('search')}<input name="query" aria-label="搜索知识库" placeholder="搜索你的知识……" value="${e(state.search)}"/><button type="submit" aria-label="搜索">↵</button></form><span class="avatar">知</span></header><div class="content">${(views[state.view] || library)()}</div></main>${modal()}${state.busy ? `<div class="busy-mask"><span class="spinner"></span><strong>${e(state.busy)}</strong><small>处理中，请稍候。已保存内容会保留在本地。</small></div>` : ''}`;
+  const views: Record<string, () => string> = { library, cards, relations: relationView, ask: askView, review: reviewView, memory: memoryView, settings: settingsView, search: searchView, graph: () => graphView(state.graph) };
+  root.innerHTML = `${nav()}<main><header class="topbar"><span class="workspace-name">个人空间 <small>/ ${({ library: '知识库', cards: '我的收藏', relations: '知识关联', ask: '知识问答', review: '复习与题库', memory: '长期记忆', settings: '设置', search: '搜索', graph: '引用图谱' } as Row)[state.view]}</small></span><form id="search-form" class="global-search">${icon('search')}<input name="query" aria-label="搜索知识库" placeholder="搜索你的知识……" value="${e(state.search)}"/><button type="submit" aria-label="搜索">↵</button></form><span class="avatar">知</span></header><div class="content">${(views[state.view] || library)()}</div></main>${modal()}${state.busy ? `<div class="busy-mask"><span class="spinner"></span><strong>${e(state.busy)}</strong><small>处理中，请稍候。已保存内容会保留在本地。</small></div>` : ''}`;
 }
 
 async function openDoc(id: string) {
   state.detail = await api.call('document', { id }); state.view = 'library'; state.selected = id; state.sourceTab = false; state.modal = '';
+}
+
+function scrollToHeading(value: string, isId = false) {
+  state.sourceTab = false; render();
+  requestAnimationFrame(() => {
+    const heading = document.getElementById(isId ? value : headingId(value));
+    if (heading) { heading.scrollIntoView({behavior:'smooth',block:'start'}); heading.classList.add('heading-highlight'); setTimeout(() => heading.classList.remove('heading-highlight'), 1800); }
+    else toast('已打开笔记，但未找到链接指定的标题');
+  });
+}
+
+async function followNoteLink(documentId: string, target: string) {
+  const link = await api.call('resolve_note_link', { id: documentId, target });
+  if (link.unresolved || !link.document_id) { state.linkResolution = link; state.modal = 'link-resolution'; return; }
+  await openDoc(link.document_id);
+  if (link.heading) state.pendingHeading = link.heading;
+}
+
+async function sourcePicker(selection: Row, sourceIds: string[] = [], detail?: Row) {
+  const data = detail || await api.call('document', {id:selection.document_id});
+  state.cardSelection = selection;
+  state.sourceMapSegments = data.segments || [];
+  const current = new Set(state.sourceMapSegments.map((s:Row) => s.id));
+  state.sourceMapIds = sourceIds.filter(id => current.has(id));
+  state.modal = 'source-map';
 }
 
 async function saveDraft() {
@@ -234,6 +262,14 @@ root.addEventListener('input', event => {
 });
 root.addEventListener('change', event => {
   const target = event.target as HTMLInputElement;
+  if (target.id === 'bookmark-filter' || target.id === 'tag-filter') { state.bookmarkFilter = target.id === 'bookmark-filter' ? target.checked : state.bookmarkFilter; state.tagFilter = target.id === 'tag-filter' ? target.value : state.tagFilter; render(); return; }
+  if (target.id === 'graph-focus') {
+    const edges:Row[] = state.graph?.edges || [], id = target.value;
+    const visible = new Set([id,...edges.filter(edge => edge.source === id || edge.target === id).flatMap(edge => [edge.source,edge.target])]);
+    root.querySelectorAll<SVGElement>('.graph-node').forEach(node => node.style.opacity = !id || visible.has(node.dataset.id!) ? '1' : '.15');
+    root.querySelectorAll<SVGElement>('.graph-edge').forEach(edge => edge.style.opacity = !id || edge.dataset.source === id || edge.dataset.target === id ? '1' : '.08');
+    return;
+  }
   if (target.name !== 'choice') return;
   const q = state.quiz.questions[state.question];
   state.quiz.answers[q.id] = Array.from(root.querySelectorAll<HTMLInputElement>('input[name="choice"]:checked')).map(x => x.value);
@@ -244,9 +280,15 @@ root.addEventListener('click', async event => {
   const target = (event.target as Element).closest<HTMLElement>('[data-action]');
   if (!target || state.busy) return;
   const a = target.dataset.action, id = target.dataset.id!;
-  if (a === 'nav') { await saveDraft().catch(err => toast(err.message, true)); state.view = target.dataset.view || 'library'; state.detail = null; state.modal = ''; render(); return; }
+  if (a === 'nav') { await saveDraft().catch(err => toast(err.message, true)); state.view = target.dataset.view || 'library'; state.detail = null; state.modal = ''; if (state.view === 'graph') { await work('读取引用图谱…', async () => { state.graph = await api.call('note_graph', {limit:200}); }); } else render(); return; }
   if (a === 'new') { state.modal = 'new'; render(); return; }
+  if (a === 'create-note' || a === 'create-linked-note') { state.newNoteTitle = a === 'create-linked-note' ? String(state.linkResolution?.target || '').split('#')[0].replace(/\.md$/i,'') : ''; state.modal = 'create-note'; render(); return; }
   if (a === 'video-modal') { state.modal = 'video'; render(); return; }
+  if (a === 'local-media-modal') { state.modal = 'local-media'; render(); return; }
+  if (a === 'filter-tag') { state.tagFilter = target.dataset.tag; state.detail = null; state.view = 'library'; render(); return; }
+  if (a === 'clear-filters') { state.tagFilter = ''; state.bookmarkFilter = false; render(); return; }
+  if (a === 'heading') { scrollToHeading(target.dataset.heading!, true); return; }
+  if (a === 'generate-tutorial') { state.modal = 'tutorial-options'; render(); return; }
   if (a === 'close-modal') { state.modal = ''; render(); return; }
   if (a === 'new-memory' || a === 'edit-memory') { state.editMemory = a === 'edit-memory' ? state.data.memories.find((m: Row) => m.id === id) : null; state.modal = 'memory'; render(); return; }
   if (a === 'edit') { state.modal = 'edit'; render(); return; }
@@ -267,7 +309,20 @@ root.addEventListener('click', async event => {
     const selection = window.getSelection(); const text = selection?.toString().trim();
     const article = document.querySelector('#reading-content');
     if (!text || !selection?.anchorNode || !article?.contains(selection.anchorNode) || !selection.focusNode || !article.contains(selection.focusNode)) { toast('请先在教程正文中选中要收藏的内容'); return; }
-    await work('保存收藏…', async () => { await api.call('add_card', { document_id: state.selected, text }); await refresh(); toast('已收藏，保留原始资料出处'); }); return;
+    const range = selection.getRangeAt(0);
+    const selectedSourceIds = Array.from(article.querySelectorAll<HTMLElement>('[data-source-id]')).filter(node => range.intersectsNode(node)).map(node => node.dataset.sourceId!);
+    if (state.detail.document.kind !== 'text') { await sourcePicker({document_id:state.selected,text}, selectedSourceIds,state.detail); render(); return; }
+    await work('保存收藏…', async () => {
+      try {
+        const card = await api.call('add_card', { document_id: state.selected, text }); await refresh();
+        if (card.unmapped || card.stale) { await sourcePicker({id:card.id,document_id:state.selected,text},selectedSourceIds,state.detail); toast('收藏已保存，请确认对应的原文出处'); }
+        else toast('已收藏，保留原始资料出处');
+      }
+      catch (err) {
+        if (/来源|原文|source/i.test((err as Error).message)) await sourcePicker({document_id:state.selected,text},selectedSourceIds,state.detail);
+        else throw err;
+      }
+    }); return;
   }
   if (a === 'generate-quiz') {
     const scope = (document.querySelector('#review-scope') as HTMLSelectElement).value;
@@ -279,8 +334,19 @@ root.addEventListener('click', async event => {
     // Native confirm is supported by Electron and keeps deletion explicit.
     if (!window.confirm('删除这份资料？关联收藏和含有该来源的练习也会删除，此操作无法撤销。')) { state.modal = ''; return; }
   }
+  if (a === 'restore-version' && !window.confirm('恢复这个版本？当前版本仍保留在历史中，相关旧来源索引、问答与练习将重新校验。')) return;
   await work(({ 'import-file': '读取资料文件…', 'generate-tutorial': '正在根据来源整理教程…', 'related-ai': '正在分析教程之间的关系…', 'build-index': 'mem0 正在抽取并保存知识，首次同步可能需要几分钟…' } as Row)[a!] || '处理中…', async () => {
     if (a === 'document') await openDoc(id);
+    if (a === 'external-link') await api.openLink(target.dataset.url!);
+    if (a === 'note-link') await followNoteLink(target.dataset.doc || state.selected,target.dataset.target!);
+    if (a === 'choose-note-link') { const heading = state.linkResolution?.heading; await openDoc(id); if (heading) state.pendingHeading = heading; }
+    if (a === 'toggle-note-bookmark') { await api.call('toggle_note_bookmark', {id:state.selected}); await refresh(); await openDoc(state.selected); }
+    if (a === 'versions') { state.versions = await api.call('note_versions', {id:state.selected}); state.modal = 'versions'; }
+    if (a === 'restore-version') { const documentId = state.selected; await api.call('restore_note_version', {id:documentId,version_id:id}); invalidateEditedSource(documentId); await refresh(); await openDoc(documentId); toast('已恢复版本，旧来源索引已清理'); }
+    if (a === 'map-card-sources') { const card = state.data.cards.find((c:Row) => c.id === id); await sourcePicker({id:card.id,document_id:card.document_id,text:card.text},card.source_ids || []); }
+    if (a === 'import-vault') { const result = await api.importVault(); if (result) { state.modal = ''; await refresh(); state.detail = null; state.view = 'library'; toast(`已导入 ${result.imported || result.documents?.length || 0} 份笔记${result.skipped?.length ? '，跳过 ' + result.skipped.length + ' 项' : ''}`); } }
+    if (a === 'export-vault') { const result = await api.exportVault(); if (result) toast(`已导出 ${result.exported || result.documents?.length || 0} 份笔记，保留来源映射`); }
+    if (a === 'retry-media-job' || a === 'cancel-media-job') { await api.call(a === 'retry-media-job' ? 'retry_media_job' : 'cancel_media_job', {id}); await refresh(); toast(a === 'retry-media-job' ? '任务已重新排队' : '已请求取消任务'); }
     if (a === 'citation') { const data = await api.call('document', { id: target.dataset.doc }); state.citation = data.segments.find((s: Row) => s.id === id); if (!state.citation) throw new Error('来源片段已更新或删除'); state.modal = 'citation'; }
     if (a === 'source-video') { const url = new URL(target.dataset.url!); url.searchParams.set('t', String(Math.floor(Number(target.dataset.time)))); await api.openLink(url.toString().replace(/^http:/, 'https:')); }
     if (a === 'import-file') { const file = await api.importFile(); if (file) { const doc = await api.call('import_text', file); await refresh(); await openDoc(doc.id); toast('资料已导入'); } }
@@ -290,12 +356,12 @@ root.addEventListener('click', async event => {
     if (a === 'delete-card' || a === 'delete-memory') { await api.call(a.replace('-', '_'), { id }); await refresh(); }
     if (a === 'related-local' || a === 'related-ai') { await api.call('related', { id: state.selected, use_ai: a === 'related-ai' }); await refresh(); await openDoc(state.selected); toast('关联候选已更新，可确认或忽略'); }
     if (a === 'confirm-relation' || a === 'reject-relation') { await api.call('set_relation', { id, status: a === 'confirm-relation' ? 'confirmed' : 'rejected' }); await refresh(); if (state.detail) await openDoc(state.selected); }
-    if (a === 'generate-tutorial') { await api.call('tutorial', { id: state.selected }); await refresh(); await openDoc(state.selected); toast('已生成教程，原始来源片段仍保留'); }
     if (a === 'open-quiz') { state.quiz = await api.call('quiz', { id }); state.question = 0; }
     if (a === 'test-model') { const result = await api.call('test_model'); toast(result.message); }
     if (a === 'build-index') { const result = await api.call('sync_mem0'); await refresh(); toast(result.message); }
     if (a === 'remove-key') { await api.saveCredential(''); await refresh(); toast('已移除 API Key'); }
   });
+  if (state.pendingHeading) { const heading = state.pendingHeading; state.pendingHeading = ''; scrollToHeading(heading); }
 });
 
 root.addEventListener('submit', async event => {
@@ -305,7 +371,27 @@ root.addEventListener('submit', async event => {
   if (state.busy) return;
   if (form.id === 'settings-form') { await work('保存模型设置…', async () => { const { api_key, ...settings } = values; await api.call('save_settings', settings); if (api_key.trim()) await api.saveCredential(api_key); await refresh(); toast('设置已保存'); }); return; }
   if (form.id === 'import-form') { await work('保存资料…', async () => { const doc = await api.call('import_text', values); await refresh(); await openDoc(doc.id); toast('已保存到本地知识库'); }); return; }
-  if (form.id === 'video-form') { await work('正在获取视频字幕…', async () => { const doc = await api.call('import_video', values); await refresh(); await openDoc(doc.id); toast('字幕已保存，可点击 AI 整理为教程'); }); return; }
+  if (form.id === 'create-note-form') { await work('创建笔记…', async () => { const doc = await api.call('import_text', values); await refresh(); await openDoc(doc.id); toast('笔记已创建'); }); return; }
+  if (form.id === 'video-form' || form.id === 'local-media-form') {
+    await work('提交媒体导入任务…', async () => {
+      const options = {title:values.title || '',language:values.language || 'auto',screenshots:new FormData(form).has('screenshots')};
+      const job = form.id === 'local-media-form' ? await api.importMedia(options) : await api.call('start_video_job', {url:values.url,options});
+      if (job) { state.modal = ''; state.view = 'library'; state.detail = null; await refresh(); toast('任务已提交，可在知识库查看进度'); }
+    }); return;
+  }
+  if (form.id === 'source-map-form') {
+    const sourceIds = new FormData(form).getAll('source_ids').map(String);
+    if (!sourceIds.length) { toast('请至少选择一个能够支持收藏内容的原文片段'); return; }
+    await work('保存收藏原文出处…', async () => {
+      const selection = state.cardSelection;
+      await api.call(selection.id ? 'map_card_sources' : 'add_card', selection.id ? {id:selection.id,source_ids:sourceIds} : {document_id:selection.document_id,text:selection.text,source_ids:sourceIds});
+      state.modal = ''; state.cardSelection = null; await refresh(); toast('已保存收藏和明确的原文出处');
+    }); return;
+  }
+  if (form.id === 'tutorial-form') {
+    const useImages = new FormData(form).has('use_images');
+    await work('正在根据来源整理教程…', async () => { await api.call('tutorial', {id:state.selected,style:values.style,use_images:useImages}); invalidateEditedSource(state.selected); await refresh(); await openDoc(state.selected); toast('已生成教程，原始来源与历史版本仍保留'); }); return;
+  }
   if (form.id === 'memory-form') { await work('保存长期记忆…', async () => { await api.call('save_memory', values); state.modal = ''; await refresh(); toast('记忆已保存，将用于后续问答'); }); return; }
   if (form.id === 'edit-form') { await work('保存修改…', async () => { await api.call('update_document', { ...values, id: state.selected }); invalidateEditedSource(state.selected); await refresh(); await openDoc(state.selected); }); return; }
   if (form.id === 'search-form') { if (!values.query.trim()) return; state.search = values.query; await work('检索知识库…', async () => { state.results = await api.call('search', { query: values.query }); state.view = 'search'; }); return; }
@@ -315,5 +401,34 @@ root.addEventListener('submit', async event => {
 api.onClosing(() => {
   saveDraft().then(() => api.finishClose(true)).catch(() => api.finishClose(false));
 });
+root.addEventListener('keydown', event => {
+  const target = event.target as Element;
+  if ((event.key === 'Enter' || event.key === ' ') && target.matches('.graph-node')) { event.preventDefault(); target.dispatchEvent(new MouseEvent('click', {bubbles:true})); }
+});
+
+let polling = false;
+setInterval(async () => {
+  if (polling || !state.data || state.busy || state.modal || state.quiz || document.hidden) return;
+  polling = true;
+  try {
+    const jobs = await api.call('media_jobs');
+    const before = new Map<string,string>((state.jobs || []).map((job:Row) => [job.id,job.status]));
+    const changed = JSON.stringify(jobs) !== JSON.stringify(state.jobs);
+    state.jobs = Array.isArray(jobs) ? jobs : jobs.jobs || [];
+    const completed = state.jobs.some((job:Row) => job.status === 'completed' && before.get(job.id) !== 'completed');
+    if (completed) await refresh();
+    // Only replace the task region. Search, editor, settings and answer drafts stay intact.
+    if (changed && state.view === 'library' && !state.detail && !state.busy && !state.modal && !state.quiz) {
+      const region = document.querySelector('#media-jobs-region');
+      if (region) region.innerHTML = mediaJobs(state.jobs);
+      if (completed) {
+        const fragment = document.createElement('div'); fragment.innerHTML = library();
+        const incoming = fragment.querySelector('#library-documents'), current = root.querySelector('#library-documents');
+        if (incoming && current) current.replaceWith(incoming);
+      }
+    }
+  } catch { /* The foreground action reports errors; polling must leave drafts untouched. */ }
+  finally { polling = false; }
+}, 2000);
 render();
 refresh().then(render).catch(err => { root.textContent = '打开知识库失败：' + err.message; });

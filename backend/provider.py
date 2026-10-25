@@ -83,13 +83,18 @@ class Provider:
         except (urllib.error.URLError, TimeoutError, OSError):
             raise ValueError('AI 服务连接失败或超时，已保存的数据不会丢失，请稍后重试') from None
 
-    def json(self, system, payload):
+    def json(self, system, payload, images=None):
         model = self.settings.get('model', '')
         if not model:
             raise ValueError('请先在设置中填写对话模型名称')
+        content = json.dumps(payload, ensure_ascii=False)
+        if images:
+            if len(images) > 6 or any(not isinstance(i, str) or len(i) > 2_000_000 or not re.fullmatch(r'data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+', i) for i in images):
+                raise ValueError('图片必须为有界的本地截图数据')
+            content = [{'type': 'text', 'text': content}] + [{'type': 'image_url', 'image_url': {'url': i}} for i in images]
         response = self.request('/chat/completions', {'model': model, 'messages': [
             {'role': 'system', 'content': system},
-            {'role': 'user', 'content': json.dumps(payload, ensure_ascii=False)}], 'temperature': 0.75})
+            {'role': 'user', 'content': content}], 'temperature': 0.75})
         try:
             content = response['choices'][0]['message']['content']
         except (KeyError, IndexError, TypeError):
