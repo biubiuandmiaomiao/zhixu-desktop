@@ -3,11 +3,51 @@ import json
 import re
 from contextlib import nullcontext
 from urllib.parse import urlparse
+from markdown_it import MarkdownIt
 
 from .provider import redact
 from .store import tokens
 from .learning_memory import generation_learning_context
 from .exports import rewrite_asset_images
+
+
+def _tutorial_evidence(content):
+    """Read citations/prose as Markdown, excluding code, comments and image labels."""
+    citation = re.compile(r'\[来源:([^\]\r\n]+)\]')
+
+    def source_reference(state, silent):
+        match = citation.match(state.src, state.pos)
+        if not match or match.end() > state.posMax:
+            return False
+        # The desktop's GFM autolinker consumes markers inside bare URL text.
+        if re.search(r'(?:[a-z][\w+.-]*://|www\.)[^\s<>]*\Z', state.pending, re.I):
+            return False
+        if not silent:
+            token = state.push('source_reference', '', 0)
+            token.content = match[1]
+        state.pos = match.end()
+        return True
+
+    def wiki_link(state, silent):
+        match = re.match(r'\[\[([^\]\n]+)\]\]', state.src[state.pos:state.posMax])
+        if not match:
+            return False
+        if not silent:
+            state.push('wiki_link', '', 0).content = match[1]
+        state.pos += match.end()
+        return True
+
+    parser = MarkdownIt('commonmark')
+    parser.inline.ruler.before('link', 'source_reference', source_reference)
+    parser.inline.ruler.before('source_reference', 'wiki_link', wiki_link)
+    cited, prose = [], []
+    for block in parser.parse(content):
+        for token in block.children or []:
+            if token.type == 'source_reference':
+                cited.append(token.content)
+            elif token.type == 'text':
+                prose.append(citation.sub('', token.content))
+    return cited, '\n'.join(prose)
 
 
 def validate_bilibili_url(url):
@@ -124,9 +164,11 @@ class Knowledge:
         if not isinstance(result.get('content'), str) or len(result['content']) < 40:
             raise ValueError('模型未返回完整教程，请重试')
         valid = {s['id'] for s in sources}
-        cited = re.findall(r'\[来源:([^\]]+)\]', result['content'])
+        cited, prose = _tutorial_evidence(result['content'])
         if not cited or any(c not in valid for c in cited):
             raise ValueError('教程引用不完整或含无效来源，已取消保存')
+        if not re.search(r'[\u3400-\u4dbf\u4e00-\u9fff]', prose):
+            raise ValueError('模型未返回中文讲解，已取消保存；请重试生成中文教程')
         result['content'], _ = rewrite_asset_images(result['content'], images or [])
         with save_guard() if save_guard else nullcontext():
             current = self.store.document(document_id)

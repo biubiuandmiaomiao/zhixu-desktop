@@ -88,7 +88,7 @@ function nav() {
   return `<aside class="sidebar"><div class="brand"><span class="brand-mark">${icon('leaf')}</span><div>知序<small>ZHIXU · YOUR LEARNING SPACE</small></div></div>
     ${button('new', icon('plus') + ' 导入学习资料', 'button primary add-button')}
     <div class="nav-label">我的学习空间</div><nav>${items.map(([view, ico, label, count]) => `<button data-action="nav" data-view="${view}" class="nav-item ${state.view === view ? 'active' : ''}">${icon(String(ico))}<span>${label}</span>${count !== '' ? `<small>${count}</small>` : ''}</button>`).join('')}</nav>
-    <div class="sidebar-bottom"><div class="local-badge"><i></i> 本地知识库 <span>只属于你</span></div><button data-action="nav" data-view="settings" class="nav-item ${state.view === 'settings' ? 'active' : ''}">${icon('gear')}<span>模型与设置</span></button><div class="version">知序 · Windows 预览版 0.4.3</div></div></aside>`;
+    <div class="sidebar-bottom"><div class="local-badge"><i></i> 本地知识库 <span>只属于你</span></div><button data-action="nav" data-view="settings" class="nav-item ${state.view === 'settings' ? 'active' : ''}">${icon('gear')}<span>模型与设置</span></button><div class="version">知序 · Windows 预览版 0.4.4</div></div></aside>`;
 }
 
 function library() {

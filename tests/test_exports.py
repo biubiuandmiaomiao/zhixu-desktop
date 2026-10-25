@@ -6,6 +6,60 @@ from backend.store import Store
 
 
 class ScreenshotExportTests(unittest.TestCase):
+    def test_reference_images_resolve_known_frames_and_reject_unknown_frames(self):
+        from backend.exports import rewrite_asset_images
+        for usage in ('![截图][picture]', '![picture][]', '![picture]'):
+            with self.subTest(usage=usage):
+                content = usage + '\n\n[picture]: <frame:known> "画面"'
+                resolved, used = rewrite_asset_images(content, [{'id': 'known'}])
+                self.assertEqual(used, {'known'})
+                self.assertIn('[picture]: <zhixu-asset:known>', resolved)
+                with self.assertRaisesRegex(ValueError, '截图'):
+                    rewrite_asset_images(usage + '\n\n[picture]: zhixu-asset:unknown', [{'id': 'known'}])
+
+    def test_reference_image_export_embeds_definition_once_without_extra_gallery(self):
+        from backend.exports import with_embedded_frames
+        from backend.notebook import Notebook
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(directory)
+            try:
+                note = store.add_document('引用式图片', '![画面][shot]\n\n![重用][shot]\n\n[shot]: zhixu-asset:known')
+                exported = with_embedded_frames(store.notebook.export_document(note['id']),
+                                               [{'id': 'known', 'start': 0, 'data_url': 'data:image/jpeg;base64,YQ=='}])
+                body = Notebook.decode_portable(exported)['content']
+                self.assertIn('[shot]: data:image/jpeg;base64,YQ==', body)
+                self.assertEqual(body.count('data:image/jpeg;base64,'), 1)
+                self.assertNotIn('## 视频截图', body)
+            finally:
+                store.close()
+
+    def test_reference_label_with_escaped_bracket_does_not_get_rewritten(self):
+        from backend.exports import rewrite_asset_images
+        from markdown_it import MarkdownIt
+        content = '![x][a\\]: frame:known x]\n\n[a\\]: frame:known x]: frame:known'
+        result, used = rewrite_asset_images(content, [{'id': 'known'}])
+        self.assertIn('[a\\]: frame:known x]: zhixu-asset:known', result)
+        images = [child.attrGet('src') for token in MarkdownIt('commonmark').parse(result)
+                  for child in token.children or [] if child.type == 'image']
+        self.assertEqual(images, ['zhixu-asset:known'])
+        self.assertEqual(used, {'known'})
+
+    def test_container_reference_definitions_keep_their_prefixes(self):
+        from backend.exports import rewrite_asset_images
+        for content in ('> ![x][shot]\n>\n> [shot]: frame:known',
+                        '![x][shot]\n\n> [shot]: frame:known',
+                        '![x][shot]\n\n- [shot]: frame:known'):
+            with self.subTest(content=content):
+                result, used = rewrite_asset_images(content, [{'id': 'known'}])
+                self.assertEqual(used, {'known'})
+                self.assertEqual(result, content.replace('frame:known', 'zhixu-asset:known'))
+
+    def test_unsupported_real_inline_image_spans_are_rejected_instead_of_silently_skipped(self):
+        from backend.exports import rewrite_asset_images
+        for content in (r'\\![图](frame:known)', '![图中 [子标签] 说明](frame:known)'):
+            with self.subTest(content=content), self.assertRaisesRegex(ValueError, '截图|格式'):
+                rewrite_asset_images(content, [{'id': 'known'}])
+
     def test_repeated_image_expansion_and_remaining_gallery_obey_body_budget(self):
         from unittest.mock import patch
         import backend.exports as exports

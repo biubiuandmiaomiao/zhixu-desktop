@@ -135,3 +135,23 @@ class MediaTutorialTests(unittest.TestCase):
         self.service.dispatch('tutorial', {'id': original['document_id']}, api_key='test-transient-credential')
         self.assertEqual(self.service.media.status(original['id'])['stage'], 'tutorial_completed')
 
+    def test_active_generation_is_not_hidden_by_recent_terminal_job_history(self):
+        self.ai.release = threading.Event()
+        created = self.start()
+        self.assertTrue(self.ai.entered.wait(5))
+        active = self.service.media.status(created['id'])
+        with self.service.media._connect() as db:
+            fixture = dict(db.execute('SELECT * FROM media_jobs WHERE id=?', (created['id'],)).fetchone())
+            fixture.update(status='cancelled', stage='cancelled', document_id=None, document_ref='',
+                           created_at='9999-01-01T00:00:00+00:00')
+            columns = list(fixture)
+            fixtures = []
+            for i in range(200):
+                fixture['id'] = f'recent-terminal-{i}'
+                fixtures.append([fixture[key] for key in columns])
+            db.executemany('INSERT INTO media_jobs (' + ','.join(columns) + ') VALUES (' +
+                           ','.join('?' for _ in columns) + ')', fixtures)
+        self.assertNotIn(created['id'], [job['id'] for job in self.service.media.status()])
+        self.assertTrue(self.service.media.tutorial_running(active['document_id']),
+                        '仍在运行的生成任务不应被最近 200 条历史记录掩盖')
+

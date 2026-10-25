@@ -262,8 +262,11 @@ class MediaJobs:
             return self._job(row)
 
     def tutorial_running(self, document_id):
-        return any(job['document_id'] == document_id and job['status'] in ('queued', 'running')
-                   and job['options'].get('generate_tutorial') for job in self.status())
+        # The UI's bounded history is not the authority for active-task guards.
+        with self._connect() as db:
+            rows = db.execute("SELECT options FROM media_jobs WHERE document_id=? AND status IN ('queued','running')",
+                              (document_id,)).fetchall()
+        return any(json.loads(row['options']).get('generate_tutorial') for row in rows)
 
     def mark_tutorial_completed(self, document_id):
         with self._lock, self._connect() as db:

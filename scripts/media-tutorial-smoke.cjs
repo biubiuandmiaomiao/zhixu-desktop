@@ -28,11 +28,12 @@ async function main() {
     if (calls === 2) await secondGate;
     assert(payload.messages[0].content.includes('中文'));
     assert(user.sources.some(s=>s.text.includes('The model')));
-    const source = calls === 1 ? 'invalid-fixture-source' : user.sources[0].id;
+    const source = user.sources[0].id;
     const frame = user.frames[0];
-    const result = {title:'创建工具',content:'# 创建工具的中文教程\n\n' +
-      '模型依据函数说明选择工具，程序负责调用实际函数并返回执行结果。'.repeat(4) +
-      ` [来源:${source}]\n\n![工具调用画面](${frame.asset_url})`};
+    const result = {title:'创建工具',content:calls === 1 ?
+      '# Function calling\n\n' + 'The application executes the function requested by the model. '.repeat(4) + ` [来源:${source}]` :
+      '# 创建工具的中文教程\n\n' + '模型依据函数说明选择工具，程序负责调用实际函数并返回执行结果。'.repeat(4) +
+      ` [来源:${source}]\n\n![工具调用画面][shot]\n\n[shot]: ${frame.asset_url.replace('zhixu-asset:', 'frame:')}`};
     res.writeHead(200, {'Content-Type':'application/json'});
     res.end(JSON.stringify({choices:[{message:{content:JSON.stringify(result)}}]}));
   });
@@ -61,6 +62,7 @@ async function main() {
     assert.equal(await page.locator('.global-search input').inputValue(),'后台失败刷新时保留的输入');
     const failed = (await page.evaluate(()=>window.knowledge.call('media_jobs')))[0];
     assert.equal(failed.stage,'tutorial_failed');
+    assert(failed.error.includes('中文讲解'));
     assert(failed.document_id);
     const original = await page.evaluate(id=>window.knowledge.call('document',{id}),failed.document_id);
     assert(original.document.content.includes('The model'));
@@ -85,13 +87,16 @@ async function main() {
     const detail = await page.evaluate(id=>window.knowledge.call('document',{id}),finished.document_id);
     assert.deepEqual(detail.segments.map(s=>s.id),original.segments.map(s=>s.id));
     assert(detail.document.content.includes('中文教程'));
+    const exported = await page.evaluate(id=>window.knowledge.call('export_document',{id}),finished.document_id);
+    assert(exported.content.includes('[shot]: data:image/jpeg;base64,'));
+    assert(!exported.content.includes('[shot]: zhixu-asset:'));
     await page.getByRole('button',{name:'打开中文教程 ↗',exact:true}).click();
     assert((await page.locator('#reading-content').innerText()).includes('模型依据函数说明'));
     assert.equal(await page.locator('#reading-content img').count(),1);
     await page.getByRole('button',{name:'来源片段',exact:true}).click();
     assert((await page.locator('.paper').innerText()).includes('The model chooses'));
     assert.equal((await page.evaluate(()=>window.knowledge.call('bootstrap'))).documents.length,1);
-    console.log('PASS: default automatic Chinese tutorial, real English subtitles/screenshots, retained raw source on model failure, retry without duplicate import, image rendering and preserved source IDs.');
+    console.log('PASS: default Chinese tutorial, English-only response rejected without changing sources, retry without duplicate import, reference-image rendering/export, preserved source IDs and focused search drafts.');
   } finally {
     releaseSecond();
     if (app) await app.close();
