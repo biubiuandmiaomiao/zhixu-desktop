@@ -1,3 +1,4 @@
+./vendor/mem0
 altgraph==0.17.5
 annotated-types==0.8.0
 anyio==4.15.1
@@ -18,15 +19,16 @@ h11==0.16.0
 h2==4.4.1
 hf-xet==1.7.0
 hpack==4.2.0
-httpcore==1.0.9
 httpcore2==2.16.0
-httpx==0.28.1
+httpcore==1.0.9
 httpx2==2.16.0
+httpx==0.28.1
 huggingface_hub==2.3.0
 hyperframe==6.1.0
 idna==3.20
 jiter==0.18.0
-./vendor/mem0
+markdown-it-py==4.2.0
+mdurl==0.1.2
 numpy==2.4.6
 onnxruntime==1.31.0
 openai==2.54.0
@@ -37,8 +39,8 @@ posthog==7.75.11
 protobuf==6.33.6
 pydantic==2.14.1
 pydantic_core==2.50.1
-pyinstaller==6.22.3
 pyinstaller-hooks-contrib==2026.9
+pyinstaller==6.22.3
 pytz==2026.5
 pywin32-ctypes==0.2.3
 PyYAML==6.0.3

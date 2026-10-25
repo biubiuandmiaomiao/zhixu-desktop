@@ -49,3 +49,22 @@ class NotebookServiceTests(unittest.TestCase):
         portable=self.service.dispatch('export_document',{'id':self.target['id']})['content']
         with self.assertRaisesRegex(ValueError,'元数据'):
             self.service.dispatch('import_text',{'title':'无效换行','content':portable.replace('\n','\r'*1100+'\n',1)})
+
+    def test_tutorial_resolves_known_frame_image_links_without_relaxing_citations(self):
+        source_id=self.service.store.segments(self.target['id'])[0]['id']
+        class ImageAI:
+            def json(inner,system,payload,images=None):
+                return {'content':'这是有出处的图文讲解。'*5+f'[来源:{source_id}]\n\n![原始画面](frame:known-frame)'}
+        result=Knowledge(self.service.store,ImageAI(),None).tutorial(self.target['id'],images=[{'id':'known-frame','start':0,'data_url':'data:image/jpeg;base64,YQ=='}],use_images=True)
+        self.assertIn('](zhixu-asset:known-frame)',result['content'])
+        self.assertNotIn('](frame:',result['content'])
+
+    def test_tutorial_rejects_unknown_frame_before_replacing_saved_body(self):
+        source_id=self.service.store.segments(self.target['id'])[0]['id']
+        before=self.service.store.document(self.target['id'])['content']
+        class ImageAI:
+            def json(inner,system,payload,images=None):
+                return {'content':'这是有出处的图文讲解。'*5+f'[来源:{source_id}]\n\n![不存在](frame:unknown-frame)'}
+        with self.assertRaisesRegex(ValueError,'截图'):
+            Knowledge(self.service.store,ImageAI(),None).tutorial(self.target['id'],images=[{'id':'known-frame','start':0,'data_url':'data:image/jpeg;base64,YQ=='}],use_images=True)
+        self.assertEqual(self.service.store.document(self.target['id'])['content'],before)

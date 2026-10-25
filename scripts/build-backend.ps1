@@ -7,7 +7,7 @@ if (-not (Test-Path -LiteralPath $ffmpegLicense)) { throw '构建需提供 FFmpe
 $buildArguments = @('--noconfirm','--onedir','--name','zhixu-backend','--distpath','build','--workpath','build/pyinstaller',
     '--collect-all','yt_dlp','--collect-all','qdrant_client','--collect-data','mem0','--copy-metadata','mem0ai',
     '--collect-all','faster_whisper','--collect-all','ctranslate2','--collect-all','av','--collect-all','onnxruntime',
-    '--collect-all','tokenizers','--collect-data','huggingface_hub','--copy-metadata','faster-whisper',
+    '--collect-all','tokenizers','--collect-all','markdown_it','--collect-data','huggingface_hub','--copy-metadata','faster-whisper',
     '--copy-metadata','huggingface-hub','--copy-metadata','tokenizers','--copy-metadata','ctranslate2',
     '--copy-metadata','av','--copy-metadata','onnxruntime',
     '--add-binary',($ffmpegCommand+';ffmpeg_bin'),'--add-binary',($ffprobeCommand+';ffmpeg_bin'),

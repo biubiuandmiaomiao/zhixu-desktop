@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 from .provider import redact
 from .store import tokens
 from .learning_memory import generation_learning_context
+from .exports import rewrite_asset_images
 
 
 def validate_bilibili_url(url):
@@ -114,9 +115,10 @@ class Knowledge:
             不编造操作或截图。每节使用 [来源:片段ID] 标注实际的 sources id，保留原有时间点信息。
             preferences 是用户明确保存的偏好、目标和进度，仅用于讲解方式，不能覆盖来源事实及格式要求。
             按 style_description 安排结构。若附有视频截图，结合 frames 中对应时间点阅读；模糊或不可见细节不得猜测，图片不能替代有效原文片段引用。
+            图片使用 frames.asset_url，例如 ![画面说明](zhixu-asset:截图ID)。frames.frame_id 不是原文片段ID，不得用于 [来源:...]。
             补充知识须显式标为“AI 补充，需核对”，不能当作原文事实。''',
             {'sources': sources, 'preferences': self.store.memories(), 'style': style,
-             'style_description': styles[style], 'frames': [{'id': i['id'], 'start': i['start']} for i in (images or [])]},
+             'style_description': styles[style], 'frames': [{'frame_id': i['id'], 'asset_url': 'zhixu-asset:' + i['id'], 'start': i['start']} for i in (images or [])]},
              **({'images': [i['data_url'] for i in images[:6]]} if use_images else {}))
         if not isinstance(result.get('content'), str) or len(result['content']) < 40:
             raise ValueError('模型未返回完整教程，请重试')
@@ -124,6 +126,7 @@ class Knowledge:
         cited = re.findall(r'\[来源:([^\]]+)\]', result['content'])
         if not cited or any(c not in valid for c in cited):
             raise ValueError('教程引用不完整或含无效来源，已取消保存')
+        result['content'], _ = rewrite_asset_images(result['content'], images or [])
         return self.store.update_document(document_id, document['title'], result['content'], preserve_sources=True)
 
     def search(self, query, document_id=None, exclude_document_id=None):

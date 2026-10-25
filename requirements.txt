@@ -4,3 +4,4 @@ pyinstaller>=6.16,<7
 ./vendor/mem0
 openai>=1.90,<3
 faster-whisper==1.2.1
+markdown-it-py==4.2.0
