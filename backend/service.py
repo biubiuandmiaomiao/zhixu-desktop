@@ -14,7 +14,8 @@ class Service:
         self.store.recover_jobs()
         self.vectors = VectorIndex(self.store)
         self.mem0 = Mem0Engine(self.store)
-        self.media = MediaJobs(directory)
+        self._media_api_key = ''
+        self.media = MediaJobs(directory, provider_factory=lambda store: Provider(store.settings(), self._media_api_key))
 
     def close(self):
         self.media.close()
@@ -24,6 +25,8 @@ class Service:
 
     def dispatch(self, action, args=None, api_key=''):
         args = args or {}
+        # Credentials stay in process memory; background jobs persist options, never keys.
+        self._media_api_key = api_key
         provider = Provider(self.store.settings(), api_key)
         knowledge = Knowledge(self.store, provider, self.vectors, self.mem0)
         review = Review(self.store, provider, self.mem0)
@@ -76,8 +79,12 @@ class Service:
         if action == 'import_video':
             return knowledge.import_video(args['url'])
         if action == 'tutorial':
+            if self.media.tutorial_running(args['id']):
+                raise ValueError('此资料正在后台生成中文教程，请等待完成或先取消任务')
             images = self.media.assets(args['id']) if args.get('use_images') else []
-            return knowledge.tutorial(args['id'], args.get('style', 'tutorial'), images=images, use_images=bool(args.get('use_images')))
+            result = knowledge.tutorial(args['id'], args.get('style', 'tutorial'), images=images, use_images=bool(args.get('use_images')))
+            self.media.mark_tutorial_completed(args['id'])
+            return result
         if action == 'update_document':
             if self.store.document(args['id'])['kind'] == 'text':
                 self.mem0.remove_document(args['id'])

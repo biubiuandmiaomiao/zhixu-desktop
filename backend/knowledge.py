@@ -1,6 +1,7 @@
 import html
 import json
 import re
+from contextlib import nullcontext
 from urllib.parse import urlparse
 
 from .provider import redact
@@ -97,7 +98,7 @@ class Knowledge:
             self.store.finish_job(job_id, error)
             raise ValueError(error) from None
 
-    def tutorial(self, document_id, style='tutorial', images=None, use_images=False):
+    def tutorial(self, document_id, style='tutorial', images=None, use_images=False, save_guard=None):
         styles = {'tutorial': '系统教程，解释概念与操作步骤', 'summary': '精简摘要，突出重点',
                   'outline': '分层大纲，突出知识结构', 'steps': '有来源支持的逐步操作',
                   'concepts': '术语定义与概念辨析', 'questions': '问答式讲解',
@@ -127,7 +128,11 @@ class Knowledge:
         if not cited or any(c not in valid for c in cited):
             raise ValueError('教程引用不完整或含无效来源，已取消保存')
         result['content'], _ = rewrite_asset_images(result['content'], images or [])
-        return self.store.update_document(document_id, document['title'], result['content'], preserve_sources=True)
+        with save_guard() if save_guard else nullcontext():
+            current = self.store.document(document_id)
+            if any(current[key] != document[key] for key in ('title', 'content', 'updated_at')):
+                raise ValueError('资料在生成期间已更新，已取消覆盖，请重新整理教程')
+            return self.store.update_document(document_id, document['title'], result['content'], preserve_sources=True)
 
     def search(self, query, document_id=None, exclude_document_id=None):
         keyword = self.store.search(query, document_id=document_id, exclude_document_id=exclude_document_id)

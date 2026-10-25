@@ -22,6 +22,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .store import Store, now, uid
+from .knowledge import Knowledge
+from .provider import redact
 
 MAX_MEDIA_BYTES = 1024 * 1024 * 1024
 MAX_DURATION_SECONDS = 4 * 60 * 60
@@ -128,16 +130,17 @@ def normalize_video_url(value):
 def _options(value):
     if value is None:
         value = {}
-    if not isinstance(value, dict) or set(value) - {'screenshots', 'language', 'title'}:
-        raise ValueError('媒体选项仅支持 screenshots、language 和 title；不接受登录凭据')
+    if not isinstance(value, dict) or set(value) - {'screenshots', 'language', 'title', 'generate_tutorial'}:
+        raise ValueError('媒体选项仅支持 screenshots、language、title 和 generate_tutorial；不接受登录凭据')
     screenshots = value.get('screenshots', False)
+    generate_tutorial = value.get('generate_tutorial', False)
     language = value.get('language', 'auto')
     title = value.get('title', '')
-    if not isinstance(screenshots, bool) or not isinstance(language, str) or not re.fullmatch(r'auto|[a-z]{2,3}', language):
+    if not isinstance(screenshots, bool) or not isinstance(generate_tutorial, bool) or not isinstance(language, str) or not re.fullmatch(r'auto|[a-z]{2,3}', language):
         raise ValueError('请提供有效的截图选项与转写语言')
     if not isinstance(title, str) or len(title.strip()) > 200:
         raise ValueError('媒体标题不得超过 200 字符')
-    return {'screenshots': screenshots, 'language': language, 'title': title.strip()}
+    return {'screenshots': screenshots, 'language': language, 'title': title.strip(), 'generate_tutorial': generate_tutorial}
 
 
 def _local_path(value):
@@ -183,7 +186,7 @@ def _subtitle_rows(text):
 
 
 class MediaJobs:
-    def __init__(self, directory, transcriber=None):
+    def __init__(self, directory, transcriber=None, provider_factory=None):
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.media_directory = self.directory / 'media'
@@ -191,6 +194,7 @@ class MediaJobs:
         self.media_directory = self.media_directory.resolve()
         self.db_path = self.directory / 'knowledge.sqlite3'
         self._transcriber, self._model = transcriber, None
+        self._provider_factory = provider_factory
         self._lock = threading.RLock()
         self._stop, self._wake = threading.Event(), threading.Event()
         self._cancelled = set()
@@ -256,6 +260,15 @@ class MediaJobs:
             if not row:
                 raise ValueError('媒体任务不存在')
             return self._job(row)
+
+    def tutorial_running(self, document_id):
+        return any(job['document_id'] == document_id and job['status'] in ('queued', 'running')
+                   and job['options'].get('generate_tutorial') for job in self.status())
+
+    def mark_tutorial_completed(self, document_id):
+        with self._lock, self._connect() as db:
+            db.execute("UPDATE media_jobs SET status='completed',stage='tutorial_completed',progress=100,error='',retryable=0,updated_at=? "
+                       "WHERE document_id=? AND status NOT IN ('queued','running')", (now(), document_id))
 
     def _enqueue(self, kind, source_name, source_url, source_path, options):
         with self._lock:
@@ -391,7 +404,9 @@ class MediaJobs:
                     with self._lock:
                         if not self._stop.is_set() and job['id'] not in self._cancelled:
                             message = str(exc) if isinstance(exc, ValueError) else '媒体处理失败，请检查文件、公开访问权限与本地依赖后重试'
-                            self._update(job['id'], status='failed', stage='failed', error=message[:1000], retryable=1)
+                            current = self.status(job['id'])
+                            stage = 'tutorial_failed' if current['document_id'] and current['options'].get('generate_tutorial') else 'failed'
+                            self._update(job['id'], status='failed', stage=stage, error=redact(message)[:1000], retryable=1)
                 finally:
                     with self._lock:
                         self._current = None
@@ -767,6 +782,10 @@ class MediaJobs:
     def _process_job(self, store, job):
         job_id = job['id']
         options = json.loads(job['options'])
+        # A tutorial failure/cancellation retains its imported source. Retry only generation.
+        if job['document_id'] and options.get('generate_tutorial'):
+            self._generate_tutorial(store, job, options)
+            return
         folder = self._managed(job_id)
         folder.mkdir(parents=True, exist_ok=True)
         rows, frames, path = None, [], None
@@ -809,9 +828,43 @@ class MediaJobs:
                     store.db.execute('INSERT OR REPLACE INTO media_files VALUES(?,?,?,?,?,?,?)',
                                      (uid(), job_id, frame['path'], Path(frame['path']).name,
                                       job['source_url'], None, 0))
-                store.db.execute("UPDATE media_jobs SET status='completed',stage='completed',progress=100,error='',retryable=0,document_id=?,document_ref=?,title=?,updated_at=? WHERE id=?",
-                                 (document_id, document_id, title, now(), job_id))
-            store.add_document(title, content, job['source_url'], kind, segments=rows, on_saved=completed)
+                automatic = options.get('generate_tutorial', False)
+                store.db.execute("UPDATE media_jobs SET status=?,stage=?,progress=?,error='',retryable=0,document_id=?,document_ref=?,title=?,updated_at=? WHERE id=?",
+                                 ('running' if automatic else 'completed', 'generating_tutorial' if automatic else 'completed',
+                                  96 if automatic else 100, document_id, document_id, title, now(), job_id))
+            document = store.add_document(title, content, job['source_url'], kind, segments=rows, on_saved=completed)
+            job['document_id'] = document['id']
+        if options.get('generate_tutorial'):
+            self._generate_tutorial(store, job, options)
+
+    def _generate_tutorial(self, store, job, options):
+        job_id, document_id = job['id'], job['document_id']
+        self._stage(job_id, 'generating_tutorial', 96)
+
+        @contextmanager
+        def commit():
+            # Network calls never hold this lock. A late result cannot win against
+            # cancellation/deletion, or overwrite a source edited while it was in flight.
+            with self._lock:
+                self._check(job_id)
+                with store.db:
+                    store.db.execute('BEGIN IMMEDIATE')
+                    yield
+                self._update(job_id, status='completed', stage='tutorial_completed', progress=100,
+                             error='', retryable=0)
+
+        try:
+            if self._provider_factory is None:
+                raise ValueError('请在模型与设置中配置对话模型和 API Key')
+            frames = self.assets(document_id) if options.get('screenshots') else []
+            provider = self._provider_factory(store)
+            Knowledge(store, provider, None).tutorial(document_id, images=frames,
+                                                     use_images=bool(frames), save_guard=commit)
+        except Cancelled:
+            raise
+        except Exception as exc:
+            message = str(exc) if isinstance(exc, ValueError) else '模型服务暂不可用，请检查设置后重试'
+            raise ValueError('原文已保存，中文教程尚未生成：' + redact(message)) from None
 
     def delete_document(self, document_id):
         """Remove registrations belonging to a deleted document, before/after Store.
