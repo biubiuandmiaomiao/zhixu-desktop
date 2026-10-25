@@ -8,6 +8,29 @@ from backend.provider import Provider
 
 
 class ProviderBudgetTests(unittest.TestCase):
+    def test_tokenhub_hy_json_uses_supported_fast_mode_without_affecting_other_services(self):
+        class Capture(Provider):
+            def request(self,endpoint,payload,embedding=False):
+                self.sent=payload
+                return {'choices':[{'message':{'content':'{"ok":true}'}}]}
+        provider=Capture({'model':'hy3','base_url':'https://tokenhub.tencentmaas.com/v1'},'test')
+        provider.json('Return JSON',{'source':'text'})
+        self.assertEqual(provider.sent.get('thinking'),{'type':'disabled'})
+        other=Capture({'model':'hy3','base_url':'https://example.com/v1'},'test')
+        other.json('Return JSON',{})
+        self.assertNotIn('thinking',other.sent)
+
+    def test_tokenhub_deepseek_vision_uses_final_json_mode_and_preserves_images(self):
+        class Capture(Provider):
+            def request(self,endpoint,payload,embedding=False):
+                self.sent=payload
+                return {'choices':[{'message':{'content':'{"ok":true}'}}]}
+        for model in ('deepseek-v4.1-flash','deepseek/deepseek-flash'):
+            provider=Capture({'model':model,'base_url':'https://tokenhub.tencentmaas.com/v1'},'test')
+            provider.json('Return JSON',{},images=['data:image/jpeg;base64,YQ=='])
+            self.assertEqual(provider.sent.get('thinking'),{'type':'disabled'})
+            self.assertEqual(provider.sent['messages'][1]['content'][1]['type'],'image_url')
+
     def test_optional_vision_uses_registered_data_images_and_text_context(self):
         class Capture(Provider):
             def request(self, endpoint, payload, embedding=False):

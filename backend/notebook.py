@@ -191,8 +191,19 @@ class Notebook:
             if 'body_length' in data:
                 length = data['body_length']
                 marker_start = content.index('<!-- zhixu-notebook:v1', match.start())
-                if isinstance(length, bool) or not isinstance(length, int) or not 0 < length <= 2_000_000 or content[length:marker_start] != '\n\n':
+                if isinstance(length, bool) or not isinstance(length, int) or not 0 < length <= 2_000_000:
                     raise ValueError()
+                if content[length:marker_start] != '\n\n':
+                    # Windows text writers may translate LF after body_length
+                    # was recorded. Retry that transport conversion once; a
+                    # correctly counted original CRLF body remains untouched.
+                    content = content.replace('\r\n', '\n')
+                    normalized_match = match.re.search(content)
+                    if not normalized_match:
+                        raise ValueError()
+                    marker_start = content.index('<!-- zhixu-notebook:v1', normalized_match.start())
+                    if content[length:marker_start] != '\n\n':
+                        raise ValueError()
                 data['content'] = content[:length]
             else:
                 data['content'] = content[:match.start()]

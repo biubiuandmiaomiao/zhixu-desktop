@@ -5,8 +5,8 @@ if exist "release\win-unpacked\Zhixu.exe" (
   start "" "release\win-unpacked\Zhixu.exe"
   exit /b
 )
-if exist "release\Zhixu-0.4.0.exe" (
-  start "" "release\Zhixu-0.4.0.exe"
+if exist "release\Zhixu-0.4.1.exe" (
+  start "" "release\Zhixu-0.4.1.exe"
   exit /b
 )
 call npm.cmd run build

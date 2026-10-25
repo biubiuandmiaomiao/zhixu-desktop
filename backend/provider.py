@@ -92,9 +92,17 @@ class Provider:
             if len(images) > 6 or any(not isinstance(i, str) or len(i) > 2_000_000 or not re.fullmatch(r'data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+', i) for i in images):
                 raise ValueError('图片必须为有界的本地截图数据')
             content = [{'type': 'text', 'text': content}] + [{'type': 'image_url', 'image_url': {'url': i}} for i in images]
-        response = self.request('/chat/completions', {'model': model, 'messages': [
+        request = {'model': model, 'messages': [
             {'role': 'system', 'content': system},
-            {'role': 'user', 'content': content}], 'temperature': 0.75})
+            {'role': 'user', 'content': content}], 'temperature': 0.75}
+        host = urllib.parse.urlparse(self.settings.get('base_url', '')).hostname
+        if model in ('hy3', 'hy4-preview', 'deepseek-v4.1-flash', 'deepseek/deepseek-flash') and host in (
+                'tokenhub.tencentmaas.com', 'tokenhub.tencentmaas.cn',
+                'tokenhub-intl.tencentmaas.com', 'tokenhub-intl.tencentmaas.cn'):
+            # Structured extraction needs final JSON within the request budget;
+            # these TokenHub models otherwise spend it on default deep thinking.
+            request['thinking'] = {'type': 'disabled'}
+        response = self.request('/chat/completions', request)
         try:
             content = response['choices'][0]['message']['content']
         except (KeyError, IndexError, TypeError):

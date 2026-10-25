@@ -673,7 +673,41 @@ class MediaJobs:
         except (Cancelled, ValueError):
             raise
         except Exception:
+            if job['kind'] == 'bilibili':
+                return self._bilibili_public(job, options, folder)
             raise ValueError('获取公开视频失败，可能需要登录或视频不可访问；仅支持无需登录的公开内容，请稍后重试或选择本地媒体') from None
+
+    def _bilibili_public(self, job, options, folder):
+        # Bilibili sometimes serves a shell page without usable initial state.
+        # Anonymous APIs still identify the exact cid and may allow a public MP4.
+        from .bilibili import BilibiliPublic
+        self._check(job['id'])
+        client = BilibiliPublic(job['source_url'])
+        info = client.info()
+        self._check(job['id'])
+        title = options['title'] or info['title'][:200]
+        self._update(job['id'], title=title)
+        rows = None
+        for track in info['subtitles'][:10]:
+            self._check(job['id'])
+            self._subtitle_url('https:' + track['subtitle_url'] if track['subtitle_url'].startswith('//') else track['subtitle_url'])
+            try:
+                parsed = _subtitle_rows(client.caption(track))
+                if parsed:
+                    rows = self._rows(parsed, info['duration'])
+                    break
+            except (ValueError, OSError):
+                continue
+        path = None
+        if rows is None or options['screenshots']:
+            path = self._existing_file(job['id'])
+            if path is None:
+                self._stage(job['id'], 'downloading', 20)
+                path = client.download(self._managed(folder / 'public.mp4'),
+                                       lambda: self._check(job['id']),
+                                       lambda value: self._stage(job['id'], 'downloading', 20 + value * 10),
+                                       MAX_MEDIA_BYTES)
+        return title, rows, path
 
     def _download(self, job, options, folder, base_options, yt_dlp):
         if not find_binary('ffmpeg') or not find_binary('ffprobe'):

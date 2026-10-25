@@ -278,6 +278,31 @@ class MediaTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_missing_bilibili_page_state_uses_exact_public_part_and_real_media_pipeline(self):
+        self.need_ffmpeg()
+        outer = self
+        seen = []
+        base = self.fake_ytdlp().YoutubeDL
+        class BrokenPage(base):
+            def extract_info(self, *args, **kwargs):
+                raise RuntimeError('Unable to extract initial state')
+        class Public:
+            def __init__(self, url):
+                seen.append(url)
+            def info(self):
+                return {'title':'P12 · 评估反射的影响','duration':3,'subtitles':[]}
+            def download(self, target, check, progress, limit):
+                check();shutil.copyfile(outer.video,target);progress(1);return target
+        jobs = self.jobs(lambda *args:[{'start':.75,'text':'真实音轨中的第十二集内容'}])
+        with patch.dict(sys.modules, {'yt_dlp':types.SimpleNamespace(YoutubeDL=BrokenPage)}), patch('backend.bilibili.BilibiliPublic',Public):
+            result = self.wait(jobs,jobs.start_video('https://www.bilibili.com/video/BV1AJen6SEVQ?p=12')['id'])
+        self.assertEqual(seen,['https://www.bilibili.com/video/BV1AJen6SEVQ?p=12'])
+        store = Store(self.tmp.name)
+        try:
+            self.assertIn('P12',store.document(result['document_id'])['title'])
+            self.assertEqual(store.segments(result['document_id'])[0]['text'],'真实音轨中的第十二集内容')
+        finally:store.close()
+
     def test_failed_caption_fetch_tries_next_valid_inline_subtitle(self):
         base = self.fake_ytdlp().YoutubeDL
         attempts = []
