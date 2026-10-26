@@ -287,7 +287,7 @@ class MediaTests(unittest.TestCase):
             def extract_info(self, *args, **kwargs):
                 raise RuntimeError('Unable to extract initial state')
         class Public:
-            def __init__(self, url):
+            def __init__(self, url, observer=None):
                 seen.append(url)
             def info(self):
                 return {'title':'P12 · 评估反射的影响','duration':3,'subtitles':[]}

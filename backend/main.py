@@ -29,7 +29,7 @@ def main():
                 value = service.dispatch(request['action'], request.get('args'), request.get('api_key', ''))
                 output = {'id': request_id, 'result': value}
             except Exception as exc:
-                # No raw provider output or credentials are written to disk or diagnostics.
+                # Protocol errors never expose credentials; tutorial drafts are retained separately after redaction.
                 message = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else '操作失败，请重试；已保存的资料仍保留在本地'
                 output = {'id': request_id, 'error': redact(message)}
             print(json.dumps(output, ensure_ascii=False), flush=True)

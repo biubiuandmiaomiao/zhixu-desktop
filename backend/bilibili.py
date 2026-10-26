@@ -4,6 +4,7 @@ No cookies, browser credentials or access-control tokens are acquired here.
 Only a complete public MP4 returned for the exact selected cid is admitted.
 """
 import gzip
+import http.client
 import io
 import json
 import math
@@ -12,6 +13,11 @@ import time
 import urllib.error
 import urllib.request
 from urllib.parse import parse_qs, urlencode, urlsplit
+
+from .ranged_media import download_budget, download_ranges
+
+RANGE_CHUNK_BYTES = 2 * 1024 * 1024
+RANGE_THRESHOLD_BYTES = RANGE_CHUNK_BYTES
 
 
 def validate_url(value, kind):
@@ -42,8 +48,12 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
         return redirected
 
 
+class _TransientPublicError(ValueError):
+    """Sanitized transport failure eligible for metadata-only retries."""
+
+
 class BilibiliPublic:
-    def __init__(self, url, opener=None):
+    def __init__(self, url, opener=None, observer=None):
         parsed = urlsplit(url)
         match = re.fullmatch(r'/video/(BV[A-Za-z0-9]{10})/?', parsed.path)
         if parsed.hostname != 'www.bilibili.com' or not match:
@@ -53,24 +63,46 @@ class BilibiliPublic:
         self.url = url
         self.opener = opener or urllib.request.build_opener(SafeRedirect())
         self.metadata = None
+        self.observer = observer
 
-    def _open(self, url, kind):
+    def _emit(self, event, details):
+        if self.observer is not None:
+            try:
+                self.observer(event, details)
+            except Exception:
+                pass
+
+    def _open(self, url, kind, timeout=20, headers=None):
         url = validate_url(url, kind)
-        req = urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0', 'Referer':self.url, 'Accept-Encoding':'identity'})
+        req = urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0', 'Referer':self.url, 'Accept-Encoding':'identity', **(headers or {})})
         req._bili_kind = kind
         try:
-            response = self.opener.open(req, timeout=20)
+            response = self.opener.open(req, timeout=timeout)
             validate_url(response.geturl(), kind)
             return response
         except urllib.error.HTTPError as exc:
-            raise ValueError(f'B站公开接口返回 HTTP {exc.code}，请稍后重试或导入本地媒体') from None
+            error = _TransientPublicError if exc.code == 429 or 500 <= exc.code <= 599 else ValueError
+            exc.close()
+            failure = error(f'B站公开接口返回 HTTP {exc.code}，请稍后重试或导入本地媒体')
+            failure.status = exc.code
+            raise failure from None
         except (urllib.error.URLError, OSError):
-            raise ValueError('B站公开资源连接失败或超时，请稍后重试') from None
+            raise _TransientPublicError('B站公开资源连接失败或超时，请稍后重试') from None
 
     def _json(self, url, kind='api'):
         limit = 4_000_000
-        with self._open(url, kind) as response:
-            raw = response.read(limit + 1)
+        # Retry only bounded metadata GETs, never media bodies or API denial codes.
+        # At most three 8-second socket timeouts plus 1.5 seconds backoff.
+        for attempt in range(3):
+            try:
+                with self._open(url, kind, timeout=8) as response:
+                    raw = response.read(limit + 1)
+                break
+            except (_TransientPublicError, OSError, http.client.IncompleteRead) as exc:
+                if attempt == 2:
+                    message = str(exc) if isinstance(exc, _TransientPublicError) else 'B站公开资源连接失败或超时，请稍后重试'
+                    raise ValueError(message) from None
+                time.sleep(0.5 * (attempt + 1))
         if len(raw) > limit:
             raise ValueError('B站公开元数据超过大小限制')
         if raw.startswith(b'\x1f\x8b'):
@@ -130,31 +162,94 @@ class BilibiliPublic:
         row = self.media()
         if int(row.get('size') or 0) > limit:
             raise ValueError('B站公开视频超过大小限制')
+        urls = [validate_url(row['url'], 'media')]
+        backups = row.get('backup_url')
+        for candidate in backups[:8] if isinstance(backups, list) else []:
+            if not isinstance(candidate, str):
+                continue
+            try:
+                candidate = validate_url(candidate, 'media')
+            except ValueError:
+                continue
+            if candidate not in urls:
+                urls.append(candidate)
         partial = path.with_suffix(path.suffix + '.part')
-        deadline, size = time.monotonic() + 600, 0
+        expected = int(row.get('size') or 0)
+        budget = download_budget(expected)
+        deadline = time.monotonic() + budget
         try:
-            check()
-            with self._open(row['url'], 'media') as response, partial.open('wb') as writer:
-                total = int(response.headers.get('Content-Length') or row.get('size') or 0)
-                if total > limit:
-                    raise ValueError('B站公开视频超过大小限制')
-                while True:
+            if expected > RANGE_THRESHOLD_BYTES:
+                if download_ranges(urls, expected, partial, path, deadline, budget,
+                                   RANGE_CHUNK_BYTES, check, progress, self._open,
+                                   self._emit, _TransientPublicError):
+                    return path
+            for attempt in range(3):
+                check()
+                if time.monotonic() >= deadline:
+                    raise ValueError('B站公开视频下载超时，可重试')
+                size = 0
+                total, status, reason = 0, 0, 'connection'
+                details = {'attempt': attempt + 1, 'expected_bytes': expected,
+                           'received_bytes': 0, 'status': 0}
+                self._emit('download_attempt', dict(details))
+                try:
+                    # Restart at byte zero: never append an unverified CDN range.
+                    # Public playurl provides equivalent CDN alternatives for this
+                    # exact cid/rendition. Rotate on transient failure, retaining
+                    # the shared deadline and full-size verification.
+                    with self._open(urls[attempt % len(urls)], 'media', timeout=min(20, max(1, deadline - time.monotonic()))) as response, partial.open('wb') as writer:
+                        status = getattr(response, 'status', 200)
+                        if status != 200 or response.headers.get('Content-Range'):
+                            raise ValueError('B站公开视频返回了非完整响应，已停止下载')
+                        header = response.headers.get('Content-Length')
+                        total = int(header) if header is not None else 0
+                        details['status'] = status
+                        if header is not None:
+                            details['header_bytes'] = total
+                        if total < 0:
+                            raise ValueError('B站公开视频长度无效')
+                        if total > limit:
+                            raise ValueError('B站公开视频超过大小限制')
+                        if expected and header is not None and total != expected:
+                            reason = 'header_mismatch'
+                            raise _TransientPublicError('B站公开视频下载不完整，可重试')
+                        while True:
+                            check()
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise ValueError('B站公开视频下载超时，可重试')
+                            # HTTPResponse.read1 performs at most one raw read, so
+                            # a trickling peer cannot hide inside read(chunk_size).
+                            sock = getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
+                            if sock is not None:
+                                sock.settimeout(min(20, remaining))
+                            try:
+                                chunk = getattr(response, 'read1', response.read)(256 * 1024)
+                            except (OSError, http.client.IncompleteRead) as exc:
+                                raise _TransientPublicError('B站公开视频下载连接中断，可重试') from None
+                            if not chunk:
+                                break
+                            size += len(chunk)
+                            details['received_bytes'] = size
+                            if size > limit:
+                                raise ValueError('B站公开视频超过大小限制')
+                            if (expected and size > expected) or (header is not None and size > total):
+                                raise ValueError('B站公开视频长度不符，已停止下载')
+                            writer.write(chunk)
+                            progress(min(1, size / (expected or total)) if expected or total else 0)
+                    if not size or (expected and size != expected) or (header is not None and size != total):
+                        reason = 'early_eof'
+                        raise _TransientPublicError('B站公开视频下载不完整，可重试')
                     check()
-                    if time.monotonic() > deadline:
-                        raise ValueError('B站公开视频下载超时，可重试')
-                    chunk = response.read(256 * 1024)
-                    if not chunk:
-                        break
-                    size += len(chunk)
-                    if size > limit:
-                        raise ValueError('B站公开视频超过大小限制')
-                    writer.write(chunk)
-                    progress(min(1, size / total) if total else 0)
-            if not size or (total and size != total):
-                raise ValueError('B站公开视频下载不完整，可重试')
-            check()
-            partial.replace(path)
-            progress(1)
-            return path
+                    partial.replace(path)
+                    progress(1)
+                    self._emit('download_completed', dict(details))
+                    return path
+                except _TransientPublicError as exc:
+                    details['status'] = getattr(exc, 'status', details['status'])
+                    self._emit('download_retry', {**details, 'reason': reason})
+                    check()
+                    if attempt == 2:
+                        raise ValueError('B站公开视频下载不完整或连接中断，可重试') from None
         finally:
             partial.unlink(missing_ok=True)

@@ -1,6 +1,6 @@
 {
   "name": "zhixu-desktop",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "private": true,
   "description": "知序：视频、知识与复习的本地学习工作台",
   "author": "Local Workspace",
@@ -52,7 +52,7 @@
       "signAndEditExecutable": false
     },
     "portable": {
-      "artifactName": "Zhixu-0.4.4.exe"
+      "artifactName": "Zhixu-0.4.5.exe"
     }
   },
   "dependencies": {

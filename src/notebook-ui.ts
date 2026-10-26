@@ -7,6 +7,12 @@ export const timestamp = (value: number) => `${Math.floor(value / 60)}:${String(
 export const notebook = (doc: Row) => doc.notebook || {tags: doc.tags || [], bookmarked: doc.bookmarked || false};
 export const tagChips = (tags: string[]) => tags.map(tag => btn('filter-tag', '#' + e(tag), `data-tag="${e(tag)}"`, 'tag-chip')).join('');
 
+export function tutorialAttempts(records: Row[] = []) {
+  if (!records.length) return '';
+  const statuses: Row = {saved:'已保存为教程',validated:'校验通过，等待保存',validation_failed:'校验未通过',repair_failed:'自动修正请求失败',save_failed:'保存已取消'};
+  return `<section class="tutorial-attempts" aria-label="教程生成记录"><h2>教程生成记录</h2><p class="muted">保留生成草稿与具体错误，自动修正最多一次。以下草稿可能未通过校验，请核对来源；最近显示 20 次结果。</p>${records.map(r => `<details><summary>${e(new Date(r.created_at).toLocaleString('zh-CN'))} · ${r.attempt === 2 ? '自动修正' : '初次生成'} · ${e(statuses[r.status] || r.status)}</summary>${(r.errors || []).map((error:Row) => `<p class="source-warning">${e(error.message)}</p>`).join('')}<pre>${e(r.content || '本次请求未返回草稿，之前生成的内容仍保留。')}</pre></details>`).join('')}</section>`;
+}
+
 export function libraryTools(data: Row, tag = '', bookmarked = false) {
   const tags = [...new Set<string>(data.documents.flatMap((doc: Row) => notebook(doc).tags || []))].sort();
   return `<div class="notebook-tools"><div class="toolbar">${btn('create-note', '＋ 新建笔记')}${btn('import-vault', '导入 Markdown 文件夹')}${btn('export-vault', '导出笔记库')}${btn('nav', '引用图谱 ↗', 'data-view="graph"')}</div><div class="library-filters"><label><input type="checkbox" id="bookmark-filter" ${bookmarked ? 'checked' : ''}/> 仅笔记书签</label><label for="tag-filter">标签</label><select id="tag-filter"><option value="">全部标签</option>${tags.map(t => `<option value="${e(t)}" ${tag === t ? 'selected' : ''}>#${e(t)}</option>`).join('')}</select>${tag || bookmarked ? btn('clear-filters', '清除筛选') : ''}</div></div>`;

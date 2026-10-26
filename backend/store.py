@@ -74,8 +74,16 @@ class Store:
             CREATE TABLE IF NOT EXISTS jobs(
                 id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL,
                 status TEXT NOT NULL, error TEXT NOT NULL, created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS tutorial_attempts(
+                id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                run_id TEXT NOT NULL, attempt INTEGER NOT NULL, content TEXT NOT NULL,
+                errors TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS tutorial_attempts_document ON tutorial_attempts(document_id, created_at);
         ''')
         self.db.commit()
+        if 'raw_result' not in {r['name'] for r in self.db.execute('PRAGMA table_info(tutorial_attempts)')}:
+            with self.db:
+                self.db.execute("ALTER TABLE tutorial_attempts ADD COLUMN raw_result TEXT NOT NULL DEFAULT '{}'")
         from .notebook import Notebook
         self.notebook = Notebook(self)
 
@@ -84,6 +92,46 @@ class Store:
 
     def rows(self, sql, args=()):
         return [dict(r) for r in self.db.execute(sql, args)]
+
+    def save_tutorial_attempt(self, document_id, run_id, attempt, content, errors, status, raw_result=None):
+        from .provider import redact
+        record_id = uid()
+        with self.db:
+            # Deletion while the model was running must not resurrect diagnostics.
+            self.db.execute('''INSERT INTO tutorial_attempts(id,document_id,run_id,attempt,content,errors,status,created_at,raw_result)
+                SELECT ?,id,?,?,?,?,?,?,? FROM documents WHERE id=?''',
+                (record_id, run_id, attempt, redact(content), self._tutorial_errors_json(errors),
+                 status, now(), self._tutorial_errors_json(raw_result or {}), document_id))
+        return record_id
+
+    def finish_tutorial_attempt(self, record_id, status, errors=None):
+        with self.db:
+            if errors is None:
+                self.db.execute('UPDATE tutorial_attempts SET status=? WHERE id=?', (status, record_id))
+            else:
+                self.db.execute('UPDATE tutorial_attempts SET status=?,errors=? WHERE id=?',
+                                (status, self._tutorial_errors_json(errors), record_id))
+
+    @staticmethod
+    def _tutorial_errors_json(errors):
+        from .provider import redact
+        def clean(value):
+            if isinstance(value, str):
+                return redact(value)
+            if isinstance(value, list):
+                return [clean(item) for item in value]
+            if isinstance(value, dict):
+                return {key: clean(item) for key, item in value.items()}
+            return value
+        return json.dumps(clean(errors), ensure_ascii=False)
+
+    def tutorial_attempts(self, document_id):
+        records = self.rows('SELECT * FROM tutorial_attempts WHERE document_id=? ORDER BY created_at DESC LIMIT 20',
+                            (document_id,))
+        for record in records:
+            record['errors'] = json.loads(record['errors'])
+            record['raw_result'] = json.loads(record['raw_result'])
+        return records
 
     def document(self, document_id):
         rows = self.rows('SELECT * FROM documents WHERE id=? AND workspace=?', (document_id, 'default'))

@@ -1,10 +1,13 @@
-const { app, BrowserWindow, ipcMain, dialog, safeStorage, shell, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, safeStorage, shell, Menu, powerSaveBlocker } = require('electron');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const readline = require('node:readline');
 const { randomUUID } = require('node:crypto');
 const { resolvePaths, resolveDataOverride } = require('./paths.cjs');
+const { JobPowerGuard } = require('./job-power.cjs');
+const jobPower = new JobPowerGuard(powerSaveBlocker);
+let powerWatchdog;
 
 const storagePaths = resolvePaths({ packaged: app.isPackaged, projectDirectory: path.resolve(__dirname, '..'),
   executablePath: process.execPath, portableDirectory: process.env.PORTABLE_EXECUTABLE_DIR,
@@ -21,10 +24,10 @@ const allowed = new Set(['bootstrap','document','import_text','import_video','tu
   'delete_document','add_card','delete_card','save_memory','delete_memory','related','set_relation',
   'search','ask','generate_quiz','quiz','save_draft','submit_quiz','save_settings','test_model','build_index','sync_mem0',
   'resolve_note_link','note_graph','note_versions','restore_note_version','toggle_note_bookmark','map_card_sources','export_document',
-  'start_video_job','media_jobs','retry_media_job','cancel_media_job']);
+  'start_video_job','media_jobs','media_activity','retry_media_job','cancel_media_job']);
 
 function rpc(action, args = {}) {
-  return new Promise((resolve, reject) => {
+  return jobPower.run(action, () => new Promise((resolve, reject) => {
     if (!backend || backend.exitCode !== null) return reject(new Error('后台服务未启动，请重启应用'));
     const id = randomUUID();
     const timeout = setTimeout(() => { pending.delete(id); reject(new Error('处理超时，请稍后查看结果或重试')); }, 300000);
@@ -32,6 +35,9 @@ function rpc(action, args = {}) {
     backend.stdin.write(JSON.stringify({ id, action, args, api_key: apiKey }) + '\n', 'utf8', error => {
       if (error && pending.has(id)) { clearTimeout(timeout); pending.delete(id); reject(new Error('后台连接已断开')); }
     });
+  })).then(result => {
+    if (action === 'cancel_media_job') void jobPower.poll(() => rpc('media_activity'));
+    return result;
   });
 }
 
@@ -54,8 +60,9 @@ function startBackend() {
       } catch { /* third-party output must not break the protocol */ }
     });
     backend.stderr.on('data', () => {});
-    backend.on('error', () => { clearTimeout(timeout); reject(new Error('后台服务无法启动，请检查安装文件')); });
+    backend.on('error', () => { jobPower.reset(); clearTimeout(timeout); reject(new Error('后台服务无法启动，请检查安装文件')); });
     backend.on('exit', () => {
+      jobPower.reset();
       clearTimeout(timeout);
       reject(new Error('后台服务启动失败'));
       for (const task of pending.values()) { clearTimeout(task.timeout); task.reject(new Error('后台服务已退出，请重启应用')); }
@@ -147,6 +154,8 @@ app.whenReady().then(async () => {
     setImmediate(() => win.close());
   });
   try { await startBackend(); } catch (error) { dialog.showErrorBox('知序启动失败', error.message); return app.quit(); }
+  powerWatchdog = setInterval(() => { void jobPower.poll(() => rpc('media_activity')); }, 5000);
+  powerWatchdog.unref();
   win = new BrowserWindow({ width: 1440, height: 960, minWidth: 1100, minHeight: 720, title: '知序 · 学习工作台', backgroundColor: '#f7f8f5',
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, sandbox: true, nodeIntegration: false } });
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -160,4 +169,4 @@ app.whenReady().then(async () => {
   app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus(); } });
 });
 app.on('window-all-closed', () => app.quit());
-app.on('will-quit', () => { if (backend) backend.stdin.end(); });
+app.on('will-quit', () => { clearInterval(powerWatchdog); jobPower.dispose(); if (backend) backend.stdin.end(); });

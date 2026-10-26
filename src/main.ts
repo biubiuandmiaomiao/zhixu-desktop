@@ -1,6 +1,6 @@
 import './style.css';
 import { renderMarkdown, headingId } from './markdown';
-import { libraryTools, notebook, notebookAside, screenshotGallery, mediaJobs, graphView, featureModal } from './notebook-ui';
+import { libraryTools, notebook, notebookAside, screenshotGallery, mediaJobs, graphView, featureModal, tutorialAttempts } from './notebook-ui';
 
 type Row = Record<string, any>;
 declare global {
@@ -88,7 +88,7 @@ function nav() {
   return `<aside class="sidebar"><div class="brand"><span class="brand-mark">${icon('leaf')}</span><div>知序<small>ZHIXU · YOUR LEARNING SPACE</small></div></div>
     ${button('new', icon('plus') + ' 导入学习资料', 'button primary add-button')}
     <div class="nav-label">我的学习空间</div><nav>${items.map(([view, ico, label, count]) => `<button data-action="nav" data-view="${view}" class="nav-item ${state.view === view ? 'active' : ''}">${icon(String(ico))}<span>${label}</span>${count !== '' ? `<small>${count}</small>` : ''}</button>`).join('')}</nav>
-    <div class="sidebar-bottom"><div class="local-badge"><i></i> 本地知识库 <span>只属于你</span></div><button data-action="nav" data-view="settings" class="nav-item ${state.view === 'settings' ? 'active' : ''}">${icon('gear')}<span>模型与设置</span></button><div class="version">知序 · Windows 预览版 0.4.4</div></div></aside>`;
+    <div class="sidebar-bottom"><div class="local-badge"><i></i> 本地知识库 <span>只属于你</span></div><button data-action="nav" data-view="settings" class="nav-item ${state.view === 'settings' ? 'active' : ''}">${icon('gear')}<span>模型与设置</span></button><div class="version">知序 · Windows 预览版 0.4.5</div></div></aside>`;
 }
 
 function library() {
@@ -112,7 +112,7 @@ function detail() {
     <div class="reading-layout"><section class="paper"><div class="paper-tabs">${button('tab-tutorial', '资料正文', `tab ${!state.sourceTab ? 'active' : ''}`)}${button('tab-source', '来源片段', `tab ${state.sourceTab ? 'active' : ''}`)}<span></span>${button('bookmark', icon('star') + ' 收藏选中内容', 'button subtle')}</div>
       ${state.sourceTab ? `<div class="source-list">${segments.map((s: Row, i: number) => `<div class="source-block" id="source-${s.id}"><div><span class="pill">来源 ${i + 1}${s.start != null ? ` · ${Math.floor(s.start / 60)}:${String(Math.floor(s.start % 60)).padStart(2, '0')}` : ''}</span>${s.url ? button('source-video', '跳转视频 ↗', 'button text-button', `data-url="${e(s.url)}" data-time="${s.start || 0}"`) : ''}</div><p>${e(s.text)}</p>${button('bookmark-segment', '收藏此段', 'button text-button', `data-id="${s.id}"`)}</div>`).join('')}</div>` : `<article id="reading-content" class="prose">${markdown(doc.content)}</article>`}</section>
       <aside class="context-panel">${notebookAside(state.detail)}<div class="context-box"><span class="mini-icon">${icon('link')}</span><h3>与这份资料相关</h3><p>跨过课程边界，连接同一份理解。</p><div class="stack-actions">${button('related-local', '发现关键词关联', 'button')}${button('related-ai', 'AI 分析关联', 'button primary')}</div>${active.map((r: Row) => `<div class="related-mini"><span class="pill">${relationNames[r.kind]}</span><button class="inline-title" data-action="document" data-id="${r.a === doc.id ? r.b : r.a}">${e(r.a === doc.id ? r.b_title : r.a_title)} ↗</button><p>${e(r.reason)}</p>${relationSources(r)}${r.status === 'suggested' ? `${button('confirm-relation', '确认关联', 'button tiny', `data-id="${r.id}"`)} ${button('reject-relation', '忽略', 'button text-button tiny', `data-id="${r.id}"`)}` : '<span class="confirmed">✓ 已确认</span>'}</div>`).join('') || '<div class="mini-empty">发现关联后，会在这里展示具体原因。</div>'}</div>
-      <div class="context-box mint"><h3>把理解再向前一步</h3><p>围绕这份资料提问，或用十道题检验掌握情况。</p>${button('ask-current', icon('chat') + ' 问问这份资料', 'button full')}${button('review-current', icon('quiz') + ' 开始十题练习', 'button full')}${button('generate-tutorial', 'AI 整理为中文教程', 'button text-button full')}</div></aside></div>${screenshotGallery(state.detail.assets || [])}`;
+      <div class="context-box mint"><h3>把理解再向前一步</h3><p>围绕这份资料提问，或用十道题检验掌握情况。</p>${button('ask-current', icon('chat') + ' 问问这份资料', 'button full')}${button('review-current', icon('quiz') + ' 开始十题练习', 'button full')}${button('generate-tutorial', 'AI 整理为中文教程', 'button text-button full')}</div></aside></div>${screenshotGallery(state.detail.assets || [])}${tutorialAttempts(state.detail.tutorial_attempts || [])}`;
 }
 
 function cards() {
@@ -189,7 +189,7 @@ function modal() {
   if (state.modal === 'new') content = `<div class="modal-heading"><div><span class="eyebrow">ADD TO YOUR KNOWLEDGE</span><h2>导入学习资料</h2></div>${button('close-modal', icon('close'), 'icon-button', 'aria-label="关闭"')}</div><div class="import-methods">${button('import-file', icon('book') + ' 选择文本 / 字幕文件', 'button')}${button('video-modal', icon('play') + ' 从视频链接导入', 'button')}${button('local-media-modal', '本地音视频', 'button')}${button('import-vault', 'Markdown 文件夹', 'button')}</div><form id="import-form"><label for="import-title">资料标题</label><input id="import-title" name="title" placeholder="例如：Python 闭包与装饰器" required maxlength="200"/><label for="import-content">粘贴文本或 Markdown</label><textarea id="import-content" name="content" placeholder="把想保存的知识放进来……" required></textarea><div class="modal-footer"><small>本地保存 · 可搜索 · 可关联 · 可复习</small><button type="submit" class="button primary">保存到知识库</button></div></form>`;
   if (state.modal === 'video' || state.modal === 'local-media') {
     const local = state.modal === 'local-media';
-    content = `<div class="modal-heading"><h2>${local ? '导入本地音视频' : '导入公开直达视频'}</h2>${button('close-modal', icon('close'), 'icon-button', 'aria-label="关闭"')}</div><p class="muted">${local ? '通过系统文件选择器读取本地视频或音频；可用字幕优先，没有字幕时使用本地转写。' : '支持 B 站 BV、YouTube、抖音 /video/ 和快手 /short-video/ 的公开直达链接。'}</p><form id="${local ? 'local-media-form' : 'video-form'}">${local ? '' : '<label for="video-url">公开视频链接或 BV 号</label><input id="video-url" name="url" type="text" placeholder="BV… 或 https://www.bilibili.com/video/BV…" required maxlength="8000"/>'}<label for="media-title">资料标题（可选）</label><input id="media-title" name="title" maxlength="200" placeholder="自动使用视频标题"/><label for="media-language">原声转写语言</label><select id="media-language" name="language"><option value="auto">自动检测</option><option value="zh">中文</option><option value="en">英语</option><option value="ja">日语</option></select><label class="checkbox-label"><input type="checkbox" name="screenshots" checked/> 提取视频时间点截图</label><label class="checkbox-label"><input type="checkbox" name="generate_tutorial" checked/> 导入后自动生成中文教程</label><p class="small-note">转写保留原声语言，教程用中文讲解；自动整理使用已配置的 AI 模型，勾选截图时会结合画面。取消勾选只保存原文。导入在后台运行，可查看进度、取消和失败重试。受限、需登录或不可访问的视频会显示真实错误。</p><div class="modal-footer"><small>${local ? '本地模型首次转写可能需要下载' : '不接受短链、播放列表或登录凭据'}</small><button class="button primary" type="submit">${local ? '选择文件并开始导入' : '开始后台导入'}</button></div></form>`;
+    content = `<div class="modal-heading"><h2>${local ? '导入本地音视频' : '导入公开直达视频'}</h2>${button('close-modal', icon('close'), 'icon-button', 'aria-label="关闭"')}</div><p class="muted">${local ? '通过系统文件选择器读取本地视频或音频；可用字幕优先，没有字幕时使用本地转写。' : '支持 B 站 BV、YouTube、抖音 /video/ 和快手 /short-video/ 的公开直达链接。'}</p><form id="${local ? 'local-media-form' : 'video-form'}">${local ? '' : '<label for="video-url">公开视频链接或 BV 号</label><input id="video-url" name="url" type="text" placeholder="BV… 或 https://www.bilibili.com/video/BV…" required maxlength="8000"/>'}<label for="media-title">资料标题（可选）</label><input id="media-title" name="title" maxlength="200" placeholder="自动使用视频标题"/><label for="media-language">原声转写语言</label><select id="media-language" name="language"><option value="auto">自动检测</option><option value="zh">中文</option><option value="en">英语</option><option value="ja">日语</option></select><label for="asr-model">本地转写质量</label><select id="asr-model" name="asr_model"><option value="tiny">快速 · tiny</option><option value="base" selected>均衡 · base</option><option value="small">高质量 · small</option></select><label class="checkbox-label"><input type="checkbox" name="screenshots" checked/> 提取视频时间点截图</label><label class="checkbox-label"><input type="checkbox" name="generate_tutorial" checked/> 导入后自动生成中文教程</label><p class="small-note">转写保留原声语言，教程用中文讲解；自动整理使用已配置的 AI 模型，勾选截图时会结合画面。取消勾选只保存原文。导入在后台运行，可查看进度、取消和失败重试。受限、需登录或不可访问的视频会显示真实错误。</p><div class="modal-footer"><small>${local ? '本地模型首次转写可能需要下载' : '不接受短链、播放列表或登录凭据'}</small><button class="button primary" type="submit">${local ? '选择文件并开始导入' : '开始后台导入'}</button></div></form>`;
   }
   if (state.modal === 'memory') {
     const m = state.editMemory || {};
@@ -375,7 +375,7 @@ root.addEventListener('submit', async event => {
   if (form.id === 'create-note-form') { await work('创建笔记…', async () => { const doc = await api.call('import_text', values); await refresh(); await openDoc(doc.id); toast('笔记已创建'); }); return; }
   if (form.id === 'video-form' || form.id === 'local-media-form') {
     await work('提交媒体导入任务…', async () => {
-      const options = {title:values.title || '',language:values.language || 'auto',screenshots:new FormData(form).has('screenshots'),generate_tutorial:new FormData(form).has('generate_tutorial')};
+      const options = {title:values.title || '',language:values.language || 'auto',asr_model:values.asr_model || 'base',screenshots:new FormData(form).has('screenshots'),generate_tutorial:new FormData(form).has('generate_tutorial')};
       const job = form.id === 'local-media-form' ? await api.importMedia(options) : await api.call('start_video_job', {url:values.url,options});
       if (job) { state.modal = ''; state.view = 'library'; state.detail = null; await refresh(); toast(options.generate_tutorial ? '任务已提交，素材保存后将自动生成中文教程' : '任务已提交，本次只导入原文'); }
     }); return;
@@ -391,7 +391,16 @@ root.addEventListener('submit', async event => {
   }
   if (form.id === 'tutorial-form') {
     const useImages = new FormData(form).has('use_images');
-    await work('正在根据来源整理教程…', async () => { await api.call('tutorial', {id:state.selected,style:values.style,use_images:useImages}); invalidateEditedSource(state.selected); await refresh(); await openDoc(state.selected); toast('已生成教程，原始来源与历史版本仍保留'); }); return;
+    await work('正在根据来源整理教程…', async () => {
+      const id = state.selected;
+      try { await api.call('tutorial', {id,style:values.style,use_images:useImages}); }
+      catch (error) {
+        // Failed attempts are durable too; show their drafts and errors immediately.
+        try { await openDoc(id); } catch { /* Keep the original generation error if the document was deleted. */ }
+        throw error;
+      }
+      invalidateEditedSource(id); await refresh(); await openDoc(id); toast('已生成教程，原始来源与历史版本仍保留');
+    }); return;
   }
   if (form.id === 'memory-form') { await work('保存长期记忆…', async () => { await api.call('save_memory', values); state.modal = ''; await refresh(); toast('记忆已保存，将用于后续问答'); }); return; }
   if (form.id === 'edit-form') { await work('保存修改…', async () => { await api.call('update_document', { ...values, id: state.selected }); invalidateEditedSource(state.selected); await refresh(); await openDoc(state.selected); }); return; }

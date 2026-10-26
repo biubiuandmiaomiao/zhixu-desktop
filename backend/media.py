@@ -1,7 +1,7 @@
 """Durable bounded media jobs; each thread owns its SQLite connections.
 
 The desktop must admit local paths with its native picker. Only registered,
-managed JPEGs can be read back. ASR uses local faster-whisper tiny CPU/int8.
+managed JPEGs can be read back. ASR uses selectable local faster-whisper CPU/int8 models.
 The optional transcriber is an external-model boundary for isolated tests.
 """
 import base64
@@ -130,8 +130,11 @@ def normalize_video_url(value):
 def _options(value):
     if value is None:
         value = {}
-    if not isinstance(value, dict) or set(value) - {'screenshots', 'language', 'title', 'generate_tutorial'}:
-        raise ValueError('媒体选项仅支持 screenshots、language、title 和 generate_tutorial；不接受登录凭据')
+    if not isinstance(value, dict) or set(value) - {'screenshots', 'language', 'title', 'generate_tutorial', 'asr_model'}:
+        raise ValueError('媒体选项仅支持 screenshots、language、title、generate_tutorial 和 asr_model；不接受登录凭据')
+    asr_model = value.get('asr_model', 'base')
+    if not isinstance(asr_model, str) or asr_model not in ('tiny', 'base', 'small'):
+        raise ValueError('ASR 模型仅支持 tiny、base 或 small')
     screenshots = value.get('screenshots', False)
     generate_tutorial = value.get('generate_tutorial', False)
     language = value.get('language', 'auto')
@@ -140,7 +143,7 @@ def _options(value):
         raise ValueError('请提供有效的截图选项与转写语言')
     if not isinstance(title, str) or len(title.strip()) > 200:
         raise ValueError('媒体标题不得超过 200 字符')
-    return {'screenshots': screenshots, 'language': language, 'title': title.strip(), 'generate_tutorial': generate_tutorial}
+    return {'screenshots': screenshots, 'language': language, 'title': title.strip(), 'generate_tutorial': generate_tutorial, 'asr_model': asr_model}
 
 
 def _local_path(value):
@@ -194,6 +197,7 @@ class MediaJobs:
         self.media_directory = self.media_directory.resolve()
         self.db_path = self.directory / 'knowledge.sqlite3'
         self._transcriber, self._model = transcriber, None
+        self._model_name = None
         self._provider_factory = provider_factory
         self._lock = threading.RLock()
         self._stop, self._wake = threading.Event(), threading.Event()
@@ -212,6 +216,11 @@ class MediaJobs:
                     attempts INTEGER NOT NULL, options TEXT NOT NULL,
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     document_ref TEXT NOT NULL DEFAULT '');
+                CREATE TABLE IF NOT EXISTS media_job_events(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL REFERENCES media_jobs(id),
+                    event TEXT NOT NULL, details TEXT NOT NULL, created_at TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS media_job_events_job ON media_job_events(job_id,id);
                 CREATE TABLE IF NOT EXISTS media_files(
                     id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES media_jobs(id),
                     path TEXT NOT NULL UNIQUE, source_name TEXT NOT NULL, source_url TEXT NOT NULL,
@@ -248,9 +257,66 @@ class MediaJobs:
         result = dict(row)
         result.pop('source_path', None)
         result.pop('document_ref', None)
-        result['options'] = json.loads(result['options'])
+        result['options'] = _options(json.loads(result['options']))
         result['retryable'] = bool(result['retryable'])
+        with self._connect() as db:
+            events = db.execute('SELECT event,details,created_at FROM media_job_events WHERE job_id=? ORDER BY id DESC LIMIT 20', (result['id'],)).fetchall()
+        result['events'] = [{'event': r['event'], 'details': json.loads(r['details']), 'created_at': r['created_at']} for r in reversed(events)]
         return result
+
+    def _asr_event(self, job_id, event, model, language=None, probability=None, count=None):
+        # Only typed, bounded ASR metadata is accepted; never exception text or URLs.
+        if event not in ('asr_started', 'asr_completed', 'asr_model_failed') or not isinstance(model, str) or model not in ('tiny', 'base', 'small'):
+            raise ValueError('无效的 ASR 诊断事件')
+        if event == 'asr_completed' and (type(count) is not int or not 0 <= count <= 50000):
+            raise ValueError('无效的 ASR 片段数')
+        details = {'asr_model': model}
+        if event == 'asr_completed':
+            details.update(language=language if isinstance(language, str) and re.fullmatch(r'[a-z]{2,3}', language) else None,
+                           language_probability=float(probability) if isinstance(probability, (int, float)) and math.isfinite(probability) and 0 <= probability <= 1 else None,
+                           segment_count=count)
+        with self._connect() as db:
+            db.execute('INSERT INTO media_job_events(job_id,event,details,created_at) VALUES(?,?,?,?)', (job_id, event, json.dumps(details), now()))
+            db.execute('DELETE FROM media_job_events WHERE job_id=? AND id NOT IN (SELECT id FROM media_job_events WHERE job_id=? ORDER BY id DESC LIMIT 20)', (job_id, job_id))
+
+    def _download_event(self, job_id, event, details):
+        # Downloader callbacks can supply only fixed enums and finite counters.
+        allowed = {'attempt', 'expected_bytes', 'header_bytes', 'received_bytes', 'status', 'reason',
+                   'range_start', 'range_end', 'committed_bytes', 'segment_attempt', 'request_count',
+                   'retry_count', 'range_chunks', 'budget_seconds', 'elapsed_seconds'}
+        if event not in ('download_attempt', 'download_retry', 'download_completed', 'download_failed') or not isinstance(details, dict) or set(details) - allowed:
+            raise ValueError('无效的下载诊断事件')
+        for key, value in details.items():
+            if key == 'reason':
+                if not isinstance(value, str) or value not in ('early_eof', 'header_mismatch', 'connection', 'deadline', 'request_limit', 'invalid_response', 'representation_changed'):
+                    raise ValueError('无效的下载诊断原因')
+            elif type(value) not in (int, float) or value < 0 or not math.isfinite(value) or (key == 'status' and type(value) is not int):
+                raise ValueError('无效的下载诊断计数')
+        with self._connect() as db:
+            db.execute('INSERT INTO media_job_events(job_id,event,details,created_at) VALUES(?,?,?,?)', (job_id, event, json.dumps(details), now()))
+            db.execute('DELETE FROM media_job_events WHERE job_id=? AND id NOT IN (SELECT id FROM media_job_events WHERE job_id=? ORDER BY id DESC LIMIT 20)', (job_id, job_id))
+
+    def activity(self):
+        # UI history is bounded; power protection must count the entire queue.
+        with self._connect() as db:
+            count = db.execute("SELECT COUNT(*) FROM media_jobs WHERE status IN ('queued','running')").fetchone()[0]
+        return {'active': count > 0, 'count': count}
+
+    def _provider_events(self, job_id, events):
+        allowed = {'request', 'attempt', 'outcome', 'reason', 'status', 'received_bytes', 'elapsed_seconds'}
+        for event in events[-6:]:
+            if not isinstance(event, dict) or set(event) != allowed:
+                raise ValueError('无效的模型传输诊断')
+            if event['outcome'] not in ('retry', 'completed', 'failed') or event['reason'] not in (
+                    'ok', 'http', 'timeout', 'dns', 'tls', 'connection_reset', 'connection', 'early_eof', 'deadline', 'invalid_response'):
+                raise ValueError('无效的模型传输原因')
+            if any(type(event[key]) not in (int, float) or not math.isfinite(event[key]) or event[key] < 0
+                   for key in allowed - {'outcome', 'reason'}):
+                raise ValueError('无效的模型传输计数')
+            with self._connect() as db:
+                db.execute('INSERT INTO media_job_events(job_id,event,details,created_at) VALUES(?,?,?,?)',
+                           (job_id, 'ai_request', json.dumps(event), now()))
+                db.execute('DELETE FROM media_job_events WHERE job_id=? AND id NOT IN (SELECT id FROM media_job_events WHERE job_id=? ORDER BY id DESC LIMIT 20)', (job_id, job_id))
 
     def status(self, job_id=None):
         with self._connect() as db:
@@ -546,24 +612,30 @@ class MediaJobs:
         return None
 
     def _transcribe(self, job_id, path, language, duration):
+        model_name = self.status(job_id)['options']['asr_model']
+        self._asr_event(job_id, 'asr_started', model_name)
         self._stage(job_id, 'transcribing', 35)
         if self._transcriber:
             return self._transcriber(str(path), language)
         try:
             from faster_whisper import WhisperModel
         except ImportError:
-            raise ValueError('缺少 faster-whisper 本地转写依赖，请修复安装后重试') from None
-        if self._model is None:
+            raise ValueError(f'缺少 faster-whisper 本地转写依赖，无法使用 {model_name} 模型；首次使用需下载模型，请修复安装后重试') from None
+        if self._model is None or self._model_name != model_name:
             self._stage(job_id, 'loading_model', 30)
             try:
-                self._model = WhisperModel('tiny', device='cpu', compute_type='int8',
+                self._model = None
+                self._model_name = None
+                self._model = WhisperModel(model_name, device='cpu', compute_type='int8',
                                            download_root=str(self.directory / 'models'),
                                            cpu_threads=min(4, os.cpu_count() or 1))
+                self._model_name = model_name
             except Exception:
-                raise ValueError('本地 Whisper tiny 模型未能加载；首次使用需下载到数据目录 models，请检查网络后重试') from None
+                self._asr_event(job_id, 'asr_model_failed', model_name)
+                raise ValueError(f'本地 Whisper {model_name} 模型未能加载；首次使用需下载到数据目录 models，请检查网络后重试') from None
         self._stage(job_id, 'transcribing', 35)
         try:
-            segments, _ = self._model.transcribe(str(path), language=None if language == 'auto' else language,
+            segments, info = self._model.transcribe(str(path), language=None if language == 'auto' else language,
                                                 vad_filter=True, beam_size=3)
             result = []
             for segment in segments:
@@ -572,6 +644,8 @@ class MediaJobs:
                     raise ValueError('转写片段过多，请按章节拆分媒体')
                 result.append({'start': segment.start, 'text': segment.text})
                 self._stage(job_id, 'transcribing', 35 + min(45, 45 * float(segment.start) / duration))
+            self._asr_event(job_id, 'asr_completed', model_name, getattr(info, 'language', None),
+                            getattr(info, 'language_probability', None), len(result))
             return result
         except Cancelled:
             raise
@@ -700,7 +774,7 @@ class MediaJobs:
         # Anonymous APIs still identify the exact cid and may allow a public MP4.
         from .bilibili import BilibiliPublic
         self._check(job['id'])
-        client = BilibiliPublic(job['source_url'])
+        client = BilibiliPublic(job['source_url'], observer=lambda event, details: self._download_event(job['id'], event, details))
         info = client.info()
         self._check(job['id'])
         title = options['title'] or info['title'][:200]
@@ -861,8 +935,13 @@ class MediaJobs:
                 raise ValueError('请在模型与设置中配置对话模型和 API Key')
             frames = self.assets(document_id) if options.get('screenshots') else []
             provider = self._provider_factory(store)
-            Knowledge(store, provider, None).tutorial(document_id, images=frames,
-                                                     use_images=bool(frames), save_guard=commit)
+            provider.check_request = lambda: self._check(job_id)
+            try:
+                Knowledge(store, provider, None).tutorial(document_id, images=frames,
+                                                         use_images=bool(frames), save_guard=commit,
+                                                         check_generation=lambda: self._check(job_id))
+            finally:
+                self._provider_events(job_id, getattr(provider, 'request_events', []))
         except Cancelled:
             raise
         except Exception as exc:

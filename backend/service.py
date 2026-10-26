@@ -36,11 +36,11 @@ class Service:
                     'relations': self.store.relations(), 'settings': self.store.settings(),
                     'conversations': self.store.conversations(), 'data_directory': str(self.store.directory),
                     'jobs': self.store.rows('SELECT id,kind,status,error,created_at FROM jobs ORDER BY created_at DESC LIMIT 5'),
-                    'mem0': self.mem0.status(provider), 'media_jobs': self.media.status()}
+                    'mem0': self.mem0.status(provider), 'media_jobs': self.media.status(), 'media_active': self.media.activity()['active']}
         if action == 'document':
             return {'document': self.store.document(args['id']), 'segments': self.store.segments(args['id']),
                     'relations': self.store.relations(args['id']), 'notebook': self.store.notebook.metadata(args['id']),
-                    'assets': self.media.assets(args['id'])}
+                    'assets': self.media.assets(args['id']), 'tutorial_attempts': self.store.tutorial_attempts(args['id'])}
         if action == 'resolve_note_link':
             return self.store.notebook.resolve_link(args['id'], args['target'])
         if action == 'note_graph':
@@ -68,6 +68,8 @@ class Service:
             return self.media.start_local(args['path'], args.get('options'))
         if action == 'start_video_job':
             return self.media.start_video(args['url'], args.get('options'))
+        if action == 'media_activity':
+            return self.media.activity()
         if action == 'media_jobs':
             return self.media.status(args.get('id'))
         if action == 'retry_media_job':

@@ -1,6 +1,9 @@
 import json
 import re
 import time
+import socket
+import ssl
+import http.client
 from contextlib import contextmanager
 import urllib.error
 import urllib.parse
@@ -25,12 +28,35 @@ def parse_json(text):
     return result
 
 
+class AIResponseError(ValueError):
+    """Model output rejected without losing the draft or safe diagnostics."""
+    def __init__(self, content, finish_reason, parse_error=None):
+        truncated = finish_reason == 'length'
+        message = 'AI 输出达到长度上限，JSON 可能不完整' if truncated else 'AI 返回的内容不是有效 JSON'
+        super().__init__(message)
+        self.raw_result = {'response_text': content if isinstance(content, str) else '',
+                           'finish_reason': finish_reason if finish_reason in ('stop', 'length', 'content_filter', 'tool_calls') else 'unknown'}
+        self.errors = [{'code': 'output_truncated' if truncated else 'malformed_json', 'message': message}]
+        if isinstance(parse_error, json.JSONDecodeError):
+            self.errors[0].update(line=parse_error.lineno, column=parse_error.colno, position=parse_error.pos)
+
+
+class AIRequestError(ValueError):
+    def __init__(self, message, events):
+        super().__init__(message)
+        self.raw_result = {'transport_attempts': [dict(event) for event in events]}
+        self.errors = [{'code': 'request_failed', 'message': message}]
+
+
 class Provider:
     def __init__(self, settings, api_key=''):
         self.settings = settings
         self.api_key = api_key
         # One Provider is created per backend operation; leave margin before IPC's 300 s limit.
         self._deadline = time.monotonic() + 240
+        self.request_events = []
+        self.check_request = None
+        self._request_count = 0
 
     @contextmanager
     def budget(self, seconds):
@@ -62,26 +88,75 @@ class Provider:
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, req, fp, code, msg, headers, newurl):
                 return None
-        try:
-            with urllib.request.build_opener(NoRedirect).open(req, timeout=self._timeout()) as response:
-                parts, size = [], 0
-                while size < 5_000_000:
-                    timeout = self._timeout()
-                    # Recompute the socket timeout for each read, including trickling responses.
-                    socket = getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
-                    if socket is not None:
-                        socket.settimeout(timeout)
-                    chunk = response.read1(min(65536, 5_000_000 - size))
-                    self._timeout()
-                    if not chunk:
-                        break
-                    parts.append(chunk)
-                    size += len(chunk)
-                return json.loads(b''.join(parts))
-        except urllib.error.HTTPError as exc:
-            raise ValueError(f'AI 服务返回 HTTP {exc.code}，请检查地址、密钥、模型和额度') from None
-        except (urllib.error.URLError, TimeoutError, OSError):
-            raise ValueError('AI 服务连接失败或超时，已保存的数据不会丢失，请稍后重试') from None
+        self._request_count += 1
+        events = []
+        for attempt in (1, 2, 3):
+            if self.check_request:
+                self.check_request()
+            started, size, status, delay = time.monotonic(), 0, 0, .5 * attempt
+            reason, retryable = '', False
+            try:
+                with urllib.request.build_opener(NoRedirect).open(req, timeout=self._timeout()) as response:
+                    parts = []
+                    while size < 5_000_000:
+                        if self.check_request:
+                            self.check_request()
+                        timeout = self._timeout()
+                        sock = getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
+                        if sock is not None:
+                            sock.settimeout(timeout)
+                        chunk = response.read1(min(65536, 5_000_000 - size))
+                        self._timeout()
+                        if not chunk:
+                            break
+                        parts.append(chunk)
+                        size += len(chunk)
+                    length = response.headers.get('Content-Length')
+                    if length and length.isdigit() and size != int(length):
+                        reason = 'early_eof'
+                        raise http.client.IncompleteRead(b'', max(0, int(length) - size))
+                    if size >= 5_000_000:
+                        raise ValueError('AI 服务响应超过大小限制')
+                    result = json.loads(b''.join(parts))
+                event = {'request': self._request_count, 'attempt': attempt, 'outcome': 'completed',
+                         'reason': 'ok', 'status': 200, 'received_bytes': size,
+                         'elapsed_seconds': round(time.monotonic() - started, 3)}
+                events.append(event); self.request_events.append(event)
+                return result
+            except urllib.error.HTTPError as exc:
+                status, reason = exc.code, 'http'
+                retryable = status in (429, 500, 502, 503, 504)
+                retry_after = exc.headers.get('Retry-After', '') if exc.headers else ''
+                if retry_after.isdigit():
+                    delay = max(delay, int(retry_after))
+                exc.close()
+                message = f'AI 服务返回 HTTP {status}，请检查地址、密钥、模型和额度'
+            except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+                cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+                if not reason:
+                    reason = ('timeout' if isinstance(cause, TimeoutError) else
+                              'dns' if isinstance(cause, socket.gaierror) else
+                              'tls' if isinstance(cause, ssl.SSLError) else
+                              'connection_reset' if isinstance(cause, ConnectionResetError) else 'connection')
+                retryable = reason != 'tls'
+                message = 'AI 服务连接失败或超时，已保存的数据不会丢失，请稍后重试'
+            except ValueError:
+                reason = 'deadline' if time.monotonic() >= self._deadline else 'invalid_response'
+                message = 'AI 请求时间预算已用尽' if reason == 'deadline' else 'AI 服务返回了无效或超限响应'
+            retry = retryable and attempt < 3 and time.monotonic() + delay < self._deadline
+            event = {'request': self._request_count, 'attempt': attempt, 'outcome': 'retry' if retry else 'failed',
+                     'reason': reason, 'status': status, 'received_bytes': size,
+                     'elapsed_seconds': round(time.monotonic() - started, 3)}
+            events.append(event); self.request_events.append(event)
+            if not retry:
+                raise AIRequestError(message, events) from None
+            while delay > 0:
+                if self.check_request:
+                    self.check_request()
+                self._timeout()
+                interval = min(.25, delay)
+                time.sleep(interval)
+                delay -= interval
 
     def json(self, system, payload, images=None):
         model = self.settings.get('model', '')
@@ -102,12 +177,28 @@ class Provider:
             # Structured extraction needs final JSON within the request budget;
             # these TokenHub models otherwise spend it on default deep thinking.
             request['thinking'] = {'type': 'disabled'}
+            if model in ('deepseek-v4.1-flash', 'deepseek/deepseek-flash'):
+                # TokenHub's documented JSON mode; do not send provider-specific
+                # capability fields to arbitrary compatible API services.
+                request['response_format'] = {'type': 'json_object'}
+                request['max_tokens'] = 16384
         response = self.request('/chat/completions', request)
         try:
-            content = response['choices'][0]['message']['content']
+            choice = response['choices'][0]
+            content = choice['message']['content']
         except (KeyError, IndexError, TypeError):
             raise ValueError('AI 服务未返回有效回答') from None
-        return parse_json(content)
+        finish = choice.get('finish_reason')
+        if finish == 'length':
+            raise AIResponseError(content, finish)
+        try:
+            return parse_json(content)
+        except (ValueError, TypeError, AttributeError):
+            try:
+                json.loads(content)
+            except (ValueError, TypeError) as exc:
+                raise AIResponseError(content, finish, exc) from None
+            raise AIResponseError(content, finish) from None
 
     def embed(self, texts):
         self._timeout()
