@@ -27,6 +27,7 @@ class PublicBilibiliTests(unittest.TestCase):
         self.caption = False
         self.preview = False
         self.media_url = 'https://upos-hz-mirrorakam.akamaized.net/public.mp4'
+        self.media_backups = []
         outer = self
         class Opener:
             def open(self, req, timeout):
@@ -38,7 +39,7 @@ class PublicBilibiliTests(unittest.TestCase):
                     tracks = [{'lan':'zh-CN','subtitle_url':'//aisubtitle.hdslb.com/public.json'}] if outer.caption else []
                     data = {'code':0,'data':{'subtitle':{'subtitles':tracks}}}
                 elif path.endswith('playurl'):
-                    data = {'code':0,'data':{'is_preview':outer.preview,'durl':[{'url':outer.media_url,'size':5,'length':496210}]}}
+                    data = {'code':0,'data':{'is_preview':outer.preview,'durl':[{'url':outer.media_url,'backup_url':outer.media_backups,'size':5,'length':496210}]}}
                 elif path.endswith('public.json'):
                     data = {'body':[{'from':1.25,'content':'真实公开字幕'}]}
                 elif path.endswith('public.mp4'):
@@ -92,6 +93,26 @@ class PublicBilibiliTests(unittest.TestCase):
         self.media_url='https://a.bilivideo.com/public.mp4'
         self.preview=True
         with self.assertRaisesRegex(ValueError,'试看'):
+            self.client.media()
+
+    def test_pcdn_primary_uses_trusted_backup_instead_of_aborting(self):
+        # Observed in production: playurl returns os=mcdn on an untrusted PCDN
+        # host first while listing official upos CDNs as backups. The response
+        # must not be discarded while a trusted candidate exists.
+        self.client.info()
+        self.media_url = 'https://b-baaa1gx2bc92p13vbgs9iegnarf0c.edge.mountaintoys.cn:4483/upgcxcode/public.mp4?os=mcdn'
+        trusted = 'https://upos-sz-estgcos.bilivideo.com/upgcxcode/public.mp4'
+        self.media_backups = [self.media_url, 'https://evil.example/a.mp4', trusted]
+        row = self.client.media()
+        self.assertEqual(row['url'], trusted)
+        self.assertEqual(row['backup_url'], [])
+        self.assertNotIn('mountaintoys', row['url'])
+
+    def test_response_without_any_trusted_media_address_is_still_rejected(self):
+        self.client.info()
+        self.media_url = 'https://b-baaa1gx2bc92p13vbgs9iegnarf0c.edge.mountaintoys.cn:4483/upgcxcode/public.mp4'
+        self.media_backups = ['https://evil.example/a.mp4', 'http://a.bilivideo.com/a', 'https://127.0.0.1/a']
+        with self.assertRaisesRegex(ValueError, '地址'):
             self.client.media()
 
 

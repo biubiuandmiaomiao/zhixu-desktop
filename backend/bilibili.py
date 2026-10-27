@@ -156,7 +156,26 @@ class BilibiliPublic:
             raise ValueError('B站未提供可直接获取的完整 MP4；可改用本地媒体')
         if float(rows[0].get('length') or 0) / 1000 < info['duration'] - 5:
             raise ValueError('B站仅返回部分或试看内容，未将其当作完整课程导入')
-        return {**rows[0], 'url':validate_url(rows[0].get('url'), 'media')}
+        row = rows[0]
+        # playurl rotates CDN assignment per call and sometimes hands out a PCDN
+        # mirror (os=mcdn, host *.edge.mountaintoys.cn) first while listing the
+        # official upos CDNs in backup_url. Admission stays fail-closed: an
+        # untrusted candidate is dropped and never opened, but it no longer
+        # discards the whole response when a trusted alternative exists.
+        backups = row.get('backup_url')
+        candidates = []
+        for candidate in [row.get('url'), *(backups if isinstance(backups, list) else [])][:9]:
+            if not isinstance(candidate, str):
+                continue
+            try:
+                candidate = validate_url(candidate, 'media')
+            except ValueError:
+                continue
+            if candidate not in candidates:
+                candidates.append(candidate)
+        if not candidates:
+            raise ValueError('B站返回的公开资源地址无效，已停止读取')
+        return {**row, 'url':candidates[0], 'backup_url':candidates[1:]}
 
     def download(self, path, check, progress, limit):
         row = self.media()
