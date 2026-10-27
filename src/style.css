@@ -6,3 +6,5 @@
 .tutorial-attempts details { margin: 12px 0; padding: 16px; border: 1px solid var(--line, #ddd); border-radius: 12px; }
 .tutorial-attempts summary { cursor: pointer; }
 .tutorial-attempts pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 480px; overflow: auto; padding: 12px; background: #f5f6f7; }
+
+.source-range { display: inline-block; margin-top: 3px; font-size: 11.5px; color: #829677; letter-spacing: .3px; }

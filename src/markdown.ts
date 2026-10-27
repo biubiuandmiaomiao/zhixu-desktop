@@ -1,7 +1,8 @@
 import { Marked, Renderer, type Tokens } from 'marked';
 import DOMPurify from 'dompurify';
+import { compactSourceLines } from './source-range';
 
-type Source = {id:string; document_id?:string};
+type Source = {id:string; document_id?:string; start?:number | null};
 type Asset = {id:string; data_url:string; caption?:string};
 type Context = {documentId?:string; sources?:Source[]; assets?:Asset[]};
 const escape = (value:unknown) => String(value ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
@@ -66,9 +67,19 @@ export function renderMarkdown(text:string, context:Context = {}) {
       return match ? {type:'sourceReference',raw:match[0],source:match[1]} : undefined;
     },
     renderer:token=>sourceIds.has(String(token.source)) ? `<button type="button" class="source-reference" data-action="citation" data-id="${escape(token.source)}" data-doc="${escape(context.documentId)}" data-source-id="${escape(token.source)}">原文出处 ↗</button>` : '<span class="unresolved-link">[原文引用已失效]</span>',
+  },{
+    name:'videoSourceRange',level:'inline',
+    start:src=>src.indexOf('[视频来源:'),
+    tokenizer(src) {
+      const match = /^\[视频来源:([^\]\n]+)\]/.exec(src);
+      return match ? {type:'videoSourceRange',raw:match[0],label:match[1]} : undefined;
+    },
+    renderer:token=>`<span class="source-range">视频来源 ${escape(token.label)}</span>`,
   }]});
+  // 阅读界面只显示每节内容来自哪段视频；逐片段原文入口保留在“来源片段”。
+  const folded = compactSourceLines(text, context.sources || []);
   // HTML from the note is escaped above. Only renderer-created actions survive.
-  return DOMPurify.sanitize(parser.parse(text,{async:false}),{FORBID_TAGS:['style','script','iframe','object','form','input'],ADD_ATTR:['data-action','data-id','data-doc','data-target','data-url','data-source-id']});
+  return DOMPurify.sanitize(parser.parse(folded,{async:false}),{FORBID_TAGS:['style','script','iframe','object','form','input'],ADD_ATTR:['data-action','data-id','data-doc','data-target','data-url','data-source-id']});
 }
 
 export function markdownOutline(text:string) {
