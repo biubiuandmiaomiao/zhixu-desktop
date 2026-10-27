@@ -26,7 +26,8 @@ def main():
             try:
                 request = json.loads(line)
                 request_id = request.get('id')
-                value = service.dispatch(request['action'], request.get('args'), request.get('api_key', ''))
+                value = service.dispatch(request['action'], request.get('args'), request.get('api_key', ''),
+                                         request.get('search_key', ''))
                 output = {'id': request_id, 'result': value}
             except Exception as exc:
                 # Protocol errors never expose credentials; tutorial drafts are retained separately after redaction.

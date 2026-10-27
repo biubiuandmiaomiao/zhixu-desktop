@@ -6,6 +6,7 @@ from .vectors import VectorIndex
 from .mem0_engine import Mem0Engine
 from .media import MediaJobs
 from .exports import with_embedded_frames
+from .websearch import WebSearch, provider_labels
 
 
 class Service:
@@ -23,12 +24,13 @@ class Service:
         self.vectors.close()
         self.store.close()
 
-    def dispatch(self, action, args=None, api_key=''):
+    def dispatch(self, action, args=None, api_key='', search_key=''):
         args = args or {}
         # Credentials stay in process memory; background jobs persist options, never keys.
         self._media_api_key = api_key
         provider = Provider(self.store.settings(), api_key)
-        knowledge = Knowledge(self.store, provider, self.vectors, self.mem0)
+        web = WebSearch(self.store.settings().get('web_search_provider', ''), search_key)
+        knowledge = Knowledge(self.store, provider, self.vectors, self.mem0, web if web.configured else None)
         review = Review(self.store, provider, self.mem0)
         if action == 'bootstrap':
             return {'documents': [{**d, 'content': d['content'][:180], 'notebook': self.store.notebook.metadata(d['id'])} for d in self.store.documents()],
@@ -36,7 +38,8 @@ class Service:
                     'relations': self.store.relations(), 'settings': self.store.settings(),
                     'conversations': self.store.conversations(), 'data_directory': str(self.store.directory),
                     'jobs': self.store.rows('SELECT id,kind,status,error,created_at FROM jobs ORDER BY created_at DESC LIMIT 5'),
-                    'mem0': self.mem0.status(provider), 'media_jobs': self.media.status(), 'media_active': self.media.activity()['active']}
+                    'mem0': self.mem0.status(provider), 'media_jobs': self.media.status(), 'media_active': self.media.activity()['active'],
+                    'has_search_key': bool(search_key), 'web_search_providers': provider_labels()}
         if action == 'document':
             return {'document': self.store.document(args['id']), 'segments': self.store.segments(args['id']),
                     'relations': self.store.relations(args['id']), 'notebook': self.store.notebook.metadata(args['id']),
@@ -139,6 +142,13 @@ class Service:
             if result.get('ok') is not True:
                 raise ValueError('服务已响应，但未按要求返回 JSON，请确认模型支持结构化文本输出')
             return {'message': '连接成功，模型可以返回 JSON'}
+        if action == 'test_search':
+            web = WebSearch(self.store.settings().get('web_search_provider', ''), search_key)
+            if not web.configured:
+                raise ValueError('请先保存联网搜索服务与搜索 API Key')
+            results = web.search(str(args.get('query') or '机器学习 入门'), 3)
+            return {'message': f'联网搜索可用，返回 {len(results)} 条结果',
+                    'sample': [{'title': row['title'], 'url': row['url']} for row in results[:3]]}
         if action in ('build_index', 'sync_mem0'):
             return self.mem0.sync(provider)
         raise ValueError('不支持的操作')

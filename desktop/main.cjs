@@ -18,11 +18,11 @@ app.setPath('sessionData', path.join(storagePaths.stateDirectory, 'session'));
 app.setPath('crashDumps', path.join(storagePaths.stateDirectory, 'crash-dumps'));
 app.setAppLogsPath(path.join(storagePaths.stateDirectory, 'logs'));
 
-let win, backend, dataDir, apiKey = '', closeReady = false, allowClose = false, closing = false;
+let win, backend, dataDir, apiKey = '', searchKey = '', closeReady = false, allowClose = false, closing = false;
 const pending = new Map();
 const allowed = new Set(['bootstrap','document','import_text','import_video','tutorial','update_document',
   'delete_document','add_card','delete_card','save_memory','delete_memory','related','set_relation',
-  'search','ask','generate_quiz','quiz','save_draft','submit_quiz','save_settings','test_model','build_index','sync_mem0',
+  'search','ask','generate_quiz','quiz','save_draft','submit_quiz','save_settings','test_model','test_search','build_index','sync_mem0',
   'resolve_note_link','note_graph','note_versions','restore_note_version','toggle_note_bookmark','map_card_sources','export_document',
   'start_video_job','media_jobs','media_activity','retry_media_job','cancel_media_job']);
 
@@ -32,7 +32,7 @@ function rpc(action, args = {}) {
     const id = randomUUID();
     const timeout = setTimeout(() => { pending.delete(id); reject(new Error('处理超时，请稍后查看结果或重试')); }, 300000);
     pending.set(id, { resolve, reject, timeout });
-    backend.stdin.write(JSON.stringify({ id, action, args, api_key: apiKey }) + '\n', 'utf8', error => {
+    backend.stdin.write(JSON.stringify({ id, action, args, api_key: apiKey, search_key: searchKey }) + '\n', 'utf8', error => {
       if (error && pending.has(id)) { clearTimeout(timeout); pending.delete(id); reject(new Error('后台连接已断开')); }
     });
   })).then(result => {
@@ -80,7 +80,9 @@ app.whenReady().then(async () => {
   dataDir = storagePaths.dataDirectory;
   fs.mkdirSync(dataDir, { recursive: true });
   const secretPath = path.join(dataDir, 'credential.bin');
+  const searchSecretPath = path.join(dataDir, 'search-credential.bin');
   try { if (fs.existsSync(secretPath)) apiKey = safeStorage.decryptString(fs.readFileSync(secretPath)); } catch {}
+  try { if (fs.existsSync(searchSecretPath)) searchKey = safeStorage.decryptString(fs.readFileSync(searchSecretPath)); } catch {}
   Menu.setApplicationMenu(null);
   ipcMain.handle('knowledge:call', async (event, action, args) => {
     assertSender(event);
@@ -98,6 +100,16 @@ app.whenReady().then(async () => {
     if (apiKey) fs.renameSync(secretPath + '.tmp', secretPath);
     else if (fs.existsSync(secretPath)) fs.unlinkSync(secretPath);
     return { saved: Boolean(apiKey) };
+  });
+  ipcMain.handle('knowledge:searchCredential', (event, value) => {
+    assertSender(event);
+    if (typeof value !== 'string' || value.length > 4096 || /[\r\n]/.test(value)) throw new Error('搜索 API Key 格式无效');
+    if (value && !safeStorage.isEncryptionAvailable()) throw new Error('系统凭据保护不可用，无法安全保存密钥');
+    searchKey = value.trim();
+    if (searchKey) fs.writeFileSync(searchSecretPath + '.tmp', safeStorage.encryptString(searchKey));
+    if (searchKey) fs.renameSync(searchSecretPath + '.tmp', searchSecretPath);
+    else if (fs.existsSync(searchSecretPath)) fs.unlinkSync(searchSecretPath);
+    return { saved: Boolean(searchKey) };
   });
   ipcMain.handle('knowledge:importFile', async event => {
     assertSender(event);

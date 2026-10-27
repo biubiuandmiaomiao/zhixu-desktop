@@ -48,10 +48,13 @@ def learning_entities(store):
                 question['source_ids'], date)
 
     for conversation in store.conversations(limit=None):
+        # Web citations have no local segment behind them, so they cannot ground a
+        # learning memory; the question is still recorded from its local citations.
+        ids = [c['id'] for c in conversation['citations'] if c.get('kind') != 'web']
         add('conversation:' + conversation['id'], 'conversation',
             f"历史提问（{conversation['created_at']}）：{conversation['question'][:2000]}\n"
             '仅记录曾提出的问题，不据此推断用户能力；历史 AI 回答不作为知识依据。',
-            [c['id'] for c in conversation['citations']], conversation['created_at'])
+            ids, conversation['created_at'])
     return result
 
 

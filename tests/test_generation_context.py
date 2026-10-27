@@ -108,6 +108,72 @@ class GenerationContextTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '引用'):
             Knowledge(self.store, OutOfRange(), None).ask('如何理解闭包？', self.doc['id'])
 
+    def test_web_search_is_used_only_when_local_evidence_is_thin(self):
+        class CitesFirst:
+            settings = {}
+            api_key = ''
+            def __init__(self):
+                self.calls = []
+            def json(self, system, payload):
+                self.calls.append((system, payload))
+                return {'answer': '回答。[1]', 'source_ids': [payload['sources'][0]['id']]}
+        class FakeWeb:
+            def __init__(self):
+                self.calls = []
+                self.results = [{'title': '外部资料', 'url': 'https://example.com/a', 'snippet': '网络上的解释'}]
+            def search(self, query, limit=4):
+                self.calls.append(query)
+                return list(self.results)
+
+        ai, web = CitesFirst(), FakeWeb()
+        result = Knowledge(self.store, ai, None, web_search=web).ask('完全无关的陌生主题是什么？', self.doc['id'])
+        self.assertTrue(web.calls)
+        self.assertIn('闭包', web.calls[0])
+        payload = ai.calls[-1][1]
+        web_rows = [s for s in payload['sources'] if s.get('kind') == 'web']
+        self.assertEqual(len(web_rows), 1)
+        self.assertIn('联网', result['notice'])
+        self.assertIn('联网', ai.calls[-1][0])
+
+        # Enough local evidence means no network call at all.
+        for index in range(4):
+            self.store.add_document(f'闭包补充 {index}', '闭包捕获外部变量，返回函数后仍保留引用。')
+        Knowledge(self.store, ai, None, web_search=web).ask('闭包捕获外部变量是什么？')
+        self.assertEqual(len(web.calls), 1)
+
+    def test_web_search_failure_keeps_the_local_answer(self):
+        class CitesFirst:
+            settings = {}
+            api_key = ''
+            def json(self, system, payload):
+                return {'answer': '回答。[1]', 'source_ids': [payload['sources'][0]['id']]}
+        class BrokenWeb:
+            def search(self, query, limit=4):
+                raise ValueError('联网搜索连接失败或超时')
+
+        result = Knowledge(self.store, CitesFirst(), None, web_search=BrokenWeb()).ask('完全无关的陌生主题是什么？', self.doc['id'])
+        self.assertIn('联网搜索未使用', result['notice'])
+        self.assertTrue(result['answer'])
+
+    def test_uncited_answer_is_accepted_only_when_it_says_evidence_is_missing(self):
+        from backend.provider import AIResponseError
+        class NoEvidence:
+            settings = {}
+            api_key = ''
+            def json(self, system, payload):
+                raise AIResponseError('资料中没有任何关于量子纠缠的内容，无法回答这个问题。', 'stop')
+        result = Knowledge(self.store, NoEvidence(), None).ask('量子纠缠是什么？', self.doc['id'])
+        self.assertEqual(result['citations'], [])
+        self.assertIn('没有找到依据', result['notice'])
+
+        class Uncited:
+            settings = {}
+            api_key = ''
+            def json(self, system, payload):
+                raise AIResponseError('闭包就是函数加上它捕获的环境。', 'stop')
+        with self.assertRaisesRegex(ValueError, '引用'):
+            Knowledge(self.store, Uncited(), None).ask('闭包是什么？', self.doc['id'])
+
     def test_tutorial_reads_current_preferences_without_embedding(self):
         Knowledge(self.store, self.ai, None).tutorial(self.doc['id'])
         self.assert_current_preferences()

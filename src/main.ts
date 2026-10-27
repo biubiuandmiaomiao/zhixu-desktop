@@ -7,6 +7,7 @@ declare global {
   interface Window { knowledge: {
     call(action: string, args?: Row): Promise<any>;
     saveCredential(value: string): Promise<any>;
+    saveSearchCredential(value: string): Promise<any>;
     importFile(): Promise<Row | null>;
     importVault(): Promise<Row | null>;
     exportVault(): Promise<Row | null>;
@@ -118,7 +119,7 @@ function followUpPanel() {
     ${rounds.length ? `<div class="follow-up-thread">${rounds.slice().reverse().map((round: Row) => `<div class="follow-up-item">
       <p class="follow-up-question">${e(round.question)}</p>
       <div class="follow-up-answer">${markdown(round.answer)}</div>
-      <div class="follow-up-sources">${(round.citations || []).map((s: Row) => `<button class="follow-up-source" data-action="citation" data-id="${e(s.id)}" data-doc="${e(s.document_id || state.selected)}">原文${typeof s.start === 'number' ? ' · ' + timestamp(s.start) : ''} ↗</button>`).join('')}</div>
+      <div class="follow-up-sources">${(round.citations || []).map((s: Row) => s.kind === 'web' ? `<button class="follow-up-source web" data-action="web-source" data-url="${e(s.url)}">联网 ↗</button>` : `<button class="follow-up-source" data-action="citation" data-id="${e(s.id)}" data-doc="${e(s.document_id || state.selected)}">原文${typeof s.start === 'number' ? ' · ' + timestamp(s.start) : ''} ↗</button>`).join('')}</div>
       ${round.notice ? `<p class="follow-up-notice">${e(round.notice)}</p>` : ''}
     </div>`).join('')}</div>` : ''}
   </div>`;
@@ -156,7 +157,9 @@ function memoryView() {
 }
 
 function citations(rows: Row[]) {
-  return rows.map((s, i) => `<button class="citation" data-action="citation" data-id="${s.id}" data-doc="${s.document_id}"><span>${i + 1}</span><div><strong>${e(s.title)}</strong><small>${e(s.text.slice(0, 90))}</small></div>↗</button>`).join('');
+  return rows.map((s, i) => s.kind === 'web'
+    ? `<button class="citation web" data-action="web-source" data-url="${e(s.url)}"><span>${i + 1}</span><div><strong>${e(s.title)}</strong><small>${e(String(s.text || '').slice(0, 90))}</small></div>↗</button>`
+    : `<button class="citation" data-action="citation" data-id="${s.id}" data-doc="${s.document_id}"><span>${i + 1}</span><div><strong>${e(s.title)}</strong><small>${e(s.text.slice(0, 90))}</small></div>↗</button>`).join('');
 }
 
 function askView() {
@@ -195,7 +198,7 @@ function settingsView() {
   const s = state.data.settings;
   return `<div class="page-heading"><div class="eyebrow">YOUR MODELS, YOUR KNOWLEDGE</div><h1>模型与设置</h1><p>使用你自己的在线 AI 服务。知识保存在本地，需要处理的片段会发送给所配置的服务。</p></div>
     <div class="settings-layout"><form id="settings-form" class="settings-card"><h2>对话与生成模型</h2><label for="base-url">兼容 API 地址（包含 /v1 等前缀）</label><input id="base-url" name="base_url" type="url" placeholder="https://你的服务地址/v1" value="${e(s.base_url || '')}" required/><label for="model">对话模型名称</label><input id="model" name="model" placeholder="填写服务商提供的准确模型 ID" value="${e(s.model || '')}" required/><label for="api-key">API Key ${state.data.has_api_key ? '<span class="confirmed">· 已加密保存</span>' : ''}</label><input id="api-key" name="api_key" type="password" autocomplete="new-password" placeholder="${state.data.has_api_key ? '留空保留现有密钥' : '输入你的 API Key'}"/>
-    <div class="form-divider"></div><h2>语义检索 <span class="pill">可选</span></h2><p>未配置时仍可使用本地关键词搜索。mem0 从原文提取知识并存入本地。首次配置或导入新资料后，请同步记忆；未配置时可使用关键词搜索。</p><label for="embedding-model">Embedding 模型名称</label><input id="embedding-model" name="embedding_model" value="${e(s.embedding_model || '')}" placeholder="填写支持中文的 Embedding 模型 ID"/><label for="embedding-url">Embedding API 地址</label><input id="embedding-url" name="embedding_url" type="url" value="${e(s.embedding_url || '')}" placeholder="留空使用上面的 API 地址"/><p class="small-note">Embedding 与对话共用此 API Key，请填写同一服务商或兼容网关的地址。</p><div class="toolbar"><button type="submit" class="button primary">保存设置</button>${button('test-model', '测试已保存的连接')}${button('build-index', '同步 mem0 记忆')}</div></form>
+    <div class="form-divider"></div><h2>语义检索 <span class="pill">可选</span></h2><p>未配置时仍可使用本地关键词搜索。mem0 从原文提取知识并存入本地。首次配置或导入新资料后，请同步记忆；未配置时可使用关键词搜索。</p><label for="embedding-model">Embedding 模型名称</label><input id="embedding-model" name="embedding_model" value="${e(s.embedding_model || '')}" placeholder="填写支持中文的 Embedding 模型 ID"/><label for="embedding-url">Embedding API 地址</label><input id="embedding-url" name="embedding_url" type="url" value="${e(s.embedding_url || '')}" placeholder="留空使用上面的 API 地址"/><p class="small-note">Embedding 与对话共用此 API Key，请填写同一服务商或兼容网关的地址。</p><div class="form-divider"></div><h2>联网搜索 <span class="pill">可选</span></h2><p>本地资料不足时自动联网补充依据，并在回答里把网络来源标注为「联网」。搜索结果只作参考，不会覆盖你的本地资料。</p><label for="web-search-provider">搜索服务</label><select id="web-search-provider" name="web_search_provider"><option value="">不启用</option>${Object.entries(s.web_search_providers || {}).map(([value, label]) => `<option value="${value}" ${s.web_search_provider === value ? 'selected' : ''}>${e(label)}</option>`).join('')}</select><label for="search-api-key">搜索 API Key ${state.data.has_search_key ? '<span class="confirmed">· 已加密保存</span>' : ''}</label><input id="search-api-key" name="search_api_key" type="password" autocomplete="new-password" placeholder="${state.data.has_search_key ? '留空保留现有搜索密钥' : '输入搜索服务的 API Key'}"/><p class="small-note">搜索密钥与对话密钥分开加密保存；未配置时只是不联网，本地问答不受影响。</p><div class="toolbar"><button type="submit" class="button primary">保存设置</button>${button('test-model', '测试已保存的连接')}${state.data.has_search_key ? button('test-search', '测试联网搜索') : ''}${state.data.has_search_key ? button('remove-search-key', '移除搜索密钥', 'button danger-quiet') : ''}${button('build-index', '同步 mem0 记忆')}</div></form>
     <aside><div class="context-box"><h3>记忆引擎 · mem0 ${e(state.data.mem0.version)}</h3><p>${state.data.mem0.knowledge_count} 条知识事实<br>${state.data.mem0.relation_count} 条已确认关联 · ${state.data.mem0.review_count} 条复习观察 · ${state.data.mem0.conversation_count} 条历史提问<br>${state.data.mem0.pending} 项资料或学习记录待同步</p><p>问答、出题前自动同步学习记录；新资料请点击同步。需要对话模型与 Embedding 模型，使用当前 API Key。</p><p>${state.data.mem0.preference_count} 条个人设置在生成前直接读取，不使用向量索引。</p></div><div class="context-box"><h3>数据留在你的电脑</h3><p>教程、收藏、题库和记忆保存在：</p><code class="data-path">${e(state.data.data_directory)}</code><p>密钥使用系统加密保存。关闭应用后数据仍保留。</p>${state.data.has_api_key ? button('remove-key', '移除已保存的 API Key', 'button danger-quiet') : ''}</div><div class="context-box"><h3>关于当前版本</h3><p>支持文本、Markdown 笔记库、SRT / VTT / B 站字幕 JSON，以及本地音视频。公开视频优先使用可用字幕，无字幕时尝试本地转写。</p><p>支持本地音视频转写、公开直达视频链接和受管理截图；任务进度在知识库显示。简答评分由 AI 辅助，适合学习反馈。</p></div></aside></div>`;
 }
 
@@ -372,6 +375,7 @@ root.addEventListener('click', async event => {
     if (a === 'retry-media-job' || a === 'cancel-media-job') { await api.call(a === 'retry-media-job' ? 'retry_media_job' : 'cancel_media_job', {id}); await refresh(); toast(a === 'retry-media-job' ? '任务已重新排队' : '已请求取消任务'); }
     if (a === 'citation') { const data = await api.call('document', { id: target.dataset.doc }); state.citation = data.segments.find((s: Row) => s.id === id); if (!state.citation) throw new Error('来源片段已更新或删除'); state.modal = 'citation'; }
     if (a === 'source-video') { const url = new URL(target.dataset.url!); url.searchParams.set('t', String(Math.floor(Number(target.dataset.time)))); await api.openLink(url.toString().replace(/^http:/, 'https:')); }
+    if (a === 'web-source') { const url = new URL(target.dataset.url!); if (!['http:', 'https:'].includes(url.protocol)) throw new Error('联网来源地址无效'); await api.openLink(url.toString()); }
     if (a === 'import-file') { const file = await api.importFile(); if (file) { const doc = await api.call('import_text', file); await refresh(); await openDoc(doc.id); toast('资料已导入'); } }
     if (a === 'export') { if (await api.exportDocument(state.selected)) toast('Markdown 已导出'); }
     if (a === 'bookmark-segment') { const s = state.detail.segments.find((s: Row) => s.id === id); await api.call('add_card', { document_id: state.selected, text: s.text, segment_id: s.id }); await refresh(); toast('已收藏此段资料'); }
@@ -381,8 +385,10 @@ root.addEventListener('click', async event => {
     if (a === 'confirm-relation' || a === 'reject-relation') { await api.call('set_relation', { id, status: a === 'confirm-relation' ? 'confirmed' : 'rejected' }); await refresh(); if (state.detail) await openDoc(state.selected); }
     if (a === 'open-quiz') { state.quiz = await api.call('quiz', { id }); state.question = 0; }
     if (a === 'test-model') { const result = await api.call('test_model'); toast(result.message); }
+    if (a === 'test-search') { const result = await api.call('test_search', {}); toast(result.message); }
     if (a === 'build-index') { const result = await api.call('sync_mem0'); await refresh(); toast(result.message); }
     if (a === 'remove-key') { await api.saveCredential(''); await refresh(); toast('已移除 API Key'); }
+    if (a === 'remove-search-key') { await api.saveSearchCredential(''); await refresh(); toast('已移除搜索 API Key'); }
   });
   if (state.pendingHeading) { const heading = state.pendingHeading; state.pendingHeading = ''; scrollToHeading(heading); }
 });
@@ -392,7 +398,7 @@ root.addEventListener('submit', async event => {
   const form = event.target as HTMLFormElement;
   const values = Object.fromEntries(new FormData(form).entries()) as Record<string, string>;
   if (state.busy) return;
-  if (form.id === 'settings-form') { await work('保存模型设置…', async () => { const { api_key, ...settings } = values; await api.call('save_settings', settings); if (api_key.trim()) await api.saveCredential(api_key); await refresh(); toast('设置已保存'); }); return; }
+  if (form.id === 'settings-form') { await work('保存模型设置…', async () => { const { api_key, search_api_key, ...settings } = values; await api.call('save_settings', settings); if (api_key.trim()) await api.saveCredential(api_key); if (search_api_key && search_api_key.trim()) await api.saveSearchCredential(search_api_key); await refresh(); toast('设置已保存'); }); return; }
   if (form.id === 'import-form') { await work('保存资料…', async () => { const doc = await api.call('import_text', values); await refresh(); await openDoc(doc.id); toast('已保存到本地知识库'); }); return; }
   if (form.id === 'create-note-form') { await work('创建笔记…', async () => { const doc = await api.call('import_text', values); await refresh(); await openDoc(doc.id); toast('笔记已创建'); }); return; }
   if (form.id === 'video-form' || form.id === 'local-media-form') {
