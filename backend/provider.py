@@ -15,6 +15,40 @@ def redact(text):
     return re.sub(r'(?i)\b(api[_-]?key|token|password|secret)\s*[:=]\s*\S+', r'\1=[已过滤]', text)
 
 
+def _json_object_candidates(text, limit=200_000):
+    """Yield balanced {...} substrings from prose that wraps a JSON object."""
+    text = text[:limit]
+    first = text.find('{')
+    if first < 0:
+        return
+    starts = [first]
+    for index in (text.find('{', first + 1), text.rfind('{')):
+        if index >= 0 and index not in starts:
+            starts.append(index)
+    for start in starts:
+        depth, quote, escaped = 0, None, False
+        for index in range(start, len(text)):
+            char = text[index]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == '\\':
+                    escaped = True
+                elif char == quote:
+                    quote = None
+                continue
+            if char == '"':
+                quote = char
+            elif char == '{':
+                depth += 1
+            elif char == '}':
+                depth -= 1
+                if depth == 0:
+                    yield text[start:index + 1]
+                    break
+
+
+
 def parse_json(text):
     text = text.strip()
     if text.startswith('```'):
@@ -22,10 +56,41 @@ def parse_json(text):
     try:
         result = json.loads(text)
     except (ValueError, TypeError):
-        raise ValueError('AI 返回的内容不是有效 JSON，请重试') from None
+        result = None
+        # A JSON-mode flag is not universally available, so tolerate the model
+        # wrapping the object in prose instead of failing the whole answer.
+        for candidate in _json_object_candidates(text):
+            try:
+                parsed = json.loads(candidate)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(parsed, dict):
+                result = parsed
+                break
+        if result is None:
+            raise ValueError('AI 返回的内容不是有效 JSON，请重试') from None
     if not isinstance(result, dict):
         raise ValueError('AI 返回格式应为 JSON 对象')
     return result
+
+
+def http_error_detail(exc, limit=240):
+    """Bounded, redacted provider explanation for a rejected request."""
+    try:
+        raw = exc.read(8192)
+    except Exception:
+        return ''
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError):
+        return ''
+    error = value.get('error') if isinstance(value, dict) else None
+    if not isinstance(error, dict):
+        return ''
+    code = str(error.get('code') or '').strip()
+    text = str(error.get('message_zh') or error.get('message') or '').strip()
+    detail = ' '.join(part for part in (code, text) if part)
+    return redact(detail)[:limit]
 
 
 class AIResponseError(ValueError):
@@ -129,8 +194,13 @@ class Provider:
                 retry_after = exc.headers.get('Retry-After', '') if exc.headers else ''
                 if retry_after.isdigit():
                     delay = max(delay, int(retry_after))
+                detail = http_error_detail(exc)
                 exc.close()
                 message = f'AI 服务返回 HTTP {status}，请检查地址、密钥、模型和额度'
+                if detail:
+                    # Surface the provider's own reason: a generic message hid a
+                    # rejected parameter and made the failure undiagnosable.
+                    message = f'AI 服务返回 HTTP {status}：{detail}'
             except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
                 cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
                 if not reason:
@@ -178,9 +248,10 @@ class Provider:
             # these TokenHub models otherwise spend it on default deep thinking.
             request['thinking'] = {'type': 'disabled'}
             if model in ('deepseek-v4.1-flash', 'deepseek/deepseek-flash'):
-                # TokenHub's documented JSON mode; do not send provider-specific
-                # capability fields to arbitrary compatible API services.
-                request['response_format'] = {'type': 'json_object'}
+                # TokenHub documents a JSON mode here, but the served model rejects
+                # the flag for real ask payloads (HTTP 400 / code 400006) while a
+                # tiny probe still passes. The prompt asks for JSON explicitly and
+                # parse_json accepts an object wrapped in prose, so do not send it.
                 request['max_tokens'] = 16384
         response = self.request('/chat/completions', request)
         try:

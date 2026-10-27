@@ -67,6 +67,47 @@ class GenerationContextTests(unittest.TestCase):
         Knowledge(self.store, self.ai, None).ask('如何理解闭包？', self.doc['id'])
         self.assertNotIn('conversation', self.ai.calls[-1][1])
 
+    def test_follow_up_without_keyword_hits_is_grounded_in_the_document(self):
+        # A conversational follow-up ("再简单讲一遍") shares no keyword with a
+        # transcript, so ask() must ground it in the selected document instead of
+        # answering that no evidence exists.
+        result = Knowledge(self.store, self.ai, None).ask('我还是不太懂，能再简单讲一遍吗？', self.doc['id'])
+        payload = self.ai.calls[-1][1]
+        self.assertTrue(payload['sources'])
+        self.assertEqual(payload['document']['title'], '闭包')
+        self.assertIn('闭包捕获外部变量', payload['document']['text'])
+        self.assertIn('document', self.ai.calls[-1][0])
+        self.assertTrue(all(s['document_id'] == self.doc['id'] for s in payload['sources']))
+        self.assertTrue(result['citations'])
+
+    def test_prose_answer_with_inline_markers_is_accepted(self):
+        # Live TokenHub behaviour: without a JSON-mode flag the model answers in
+        # Markdown with [n] markers. That is still a cited answer, not a failure.
+        from backend.provider import AIResponseError
+        class ProseAI:
+            settings = {}
+            api_key = ''
+            def json(self, system, payload):
+                raise AIResponseError('闭包捕获外部变量，返回函数后仍保留引用 [1]。', 'stop')
+        result = Knowledge(self.store, ProseAI(), None).ask('如何理解闭包？', self.doc['id'])
+        self.assertIn('闭包', result['answer'])
+        self.assertEqual(len(result['citations']), 1)
+        self.assertTrue(self.store.conversations())
+        class Truncated:
+            settings = {}
+            api_key = ''
+            def json(self, system, payload):
+                raise AIResponseError('闭包捕获外部变量 [1]', 'length')
+        with self.assertRaises(ValueError):
+            Knowledge(self.store, Truncated(), None).ask('如何理解闭包？', self.doc['id'])
+        class OutOfRange:
+            settings = {}
+            api_key = ''
+            def json(self, system, payload):
+                raise AIResponseError('闭包捕获外部变量 [9]。', 'stop')
+        with self.assertRaisesRegex(ValueError, '引用'):
+            Knowledge(self.store, OutOfRange(), None).ask('如何理解闭包？', self.doc['id'])
+
     def test_tutorial_reads_current_preferences_without_embedding(self):
         Knowledge(self.store, self.ai, None).tutorial(self.doc['id'])
         self.assert_current_preferences()
