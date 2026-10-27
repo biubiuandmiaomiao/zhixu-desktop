@@ -8,3 +8,21 @@
 .tutorial-attempts pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 480px; overflow: auto; padding: 12px; background: #f5f6f7; }
 
 .source-range { display: inline-block; margin-top: 3px; font-size: 11.5px; color: #829677; letter-spacing: .3px; }
+
+.follow-up textarea { width: 100%; min-height: 74px; margin: 12px 0 0; font-size: 12px; line-height: 1.8; }
+.follow-up-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
+.follow-up-actions small { font-size: 10px; color: #9aa694; }
+.follow-up-actions .button { min-height: 32px; padding: 6px 13px; font-size: 11px; }
+.follow-up-thread { margin-top: 15px; display: flex; flex-direction: column; gap: 13px; max-height: 430px; overflow: auto; }
+.follow-up-item { border-top: 1px solid var(--line); padding-top: 12px; }
+.follow-up-item:first-child { border-top: 0; padding-top: 0; }
+.follow-up-question { font-size: 11px; font-weight: 600; line-height: 1.8; color: #52694a; background: #f1f6ec; border-radius: 7px; padding: 7px 10px; }
+.follow-up-answer { font-size: 12px; line-height: 1.85; color: #4d6350; margin-top: 9px; }
+.follow-up-answer p { margin: 6px 0; }
+.follow-up-answer ul, .follow-up-answer ol { padding-left: 18px; margin: 6px 0; }
+.follow-up-answer li { margin: 3px 0; }
+.follow-up-answer strong { color: #3f5a40; }
+.follow-up-sources { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.follow-up-source { font-size: 10px; border: 1px solid #dce7d4; background: #f4f8ef; color: #5b7a4c; border-radius: 999px; padding: 3px 8px; }
+.follow-up-source:hover { background: #e6efdd; color: #3f6030; }
+.follow-up-notice { font-size: 10px; color: #9aa694; line-height: 1.8; margin-top: 8px; }

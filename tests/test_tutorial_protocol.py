@@ -25,6 +25,14 @@ class TutorialProtocolTests(unittest.TestCase):
         return {'heading':'概述','content':'模型生成计划，程序执行工具；可通过结构化数据检查工具和参数。' * 3,
                 'source_ids':['S1'], 'frame_ids':['F1'], **changes}
 
+    def glossary(self, **changes):
+        return [{'term':'工具调用','plain':'模型说明要做什么，程序按计划真正执行每一步并记录结果。','supplement':False},
+                {'term':'结构化输出','plain':'把步骤写成带字段的数据，方便逐项检查工具和参数。','supplement':True}]
+
+    def draft(self, sections=None, terms=None, **changes):
+        return {'title':'测试教程', 'terms': self.glossary() if terms is None else terms,
+                'sections': [self.section()] if sections is None else sections, **changes}
+
     def run_model(self, results):
         calls = []
         def respond(system, payload, **kwargs):
@@ -34,8 +42,17 @@ class TutorialProtocolTests(unittest.TestCase):
             self.doc['id'], images=self.frames, use_images=True)
         return result, calls
 
+    def test_glossary_is_explained_before_the_tutorial_body(self):
+        result, _ = self.run_model([self.draft()])
+        content = result['content']
+        self.assertTrue(content.startswith('## 先认识这些名词'))
+        self.assertLess(content.index('先认识这些名词'), content.index('## 概述'))
+        self.assertIn('**工具调用**', content)
+        self.assertIn('（AI 补充，需核对）', content)
+        self.assertEqual(content.count('AI 补充，需核对'), 1)
+
     def test_program_renders_source_and_frame_fields_without_model_uuid_copying(self):
-        result, calls = self.run_model([{'sections':[self.section()]}])
+        result, calls = self.run_model([self.draft()])
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]['sources'][0]['ref'], 'S1')
         self.assertEqual(calls[0]['frames'][0]['frame_id'], 'F1')
@@ -48,31 +65,63 @@ class TutorialProtocolTests(unittest.TestCase):
 
     def test_frame_handle_cannot_become_source_even_if_frame_exists(self):
         with self.assertRaisesRegex(ValueError, '截图|原文'):
-            self.run_model([{'sections':[self.section(source_ids=['F1'])]}])
+            self.run_model([self.draft(sections=[self.section(source_ids=['F1'])])])
         self.assertEqual(self.store.document(self.doc['id'])['content'], self.doc['content'])
 
     def test_verified_timestamp_suffix_is_separated_without_changing_evidence(self):
-        result, calls = self.run_model([{'sections':[self.section(source_ids=['S1 @12.5'])]}])
+        result, calls = self.run_model([self.draft(sections=[self.section(source_ids=['S1 @12.5'])])])
         self.assertEqual(len(calls), 1)
         self.assertEqual(_tutorial_evidence(result['content'])[0], [self.sources[0]['id']])
 
     def test_wrong_timestamp_or_unknown_handle_is_not_silently_bound(self):
         for ref in ['S1 @99', 'S999', self.frames[0]['id']]:
             with self.subTest(ref=ref), self.assertRaises(ValueError):
-                self.run_model([{'sections':[self.section(source_ids=[ref])]}])
+                self.run_model([self.draft(sections=[self.section(source_ids=[ref])])])
         self.assertEqual(self.store.document(self.doc['id'])['content'], self.doc['content'])
 
     def test_each_factual_section_requires_evidence(self):
         with self.assertRaisesRegex(ValueError, '来源|引用|原文'):
-            self.run_model([{'sections':[self.section(), self.section(source_ids=[])]}])
+            self.run_model([self.draft(sections=[self.section(), self.section(source_ids=[])])])
 
     def test_supplement_is_explicitly_labeled_and_does_not_replace_source_section(self):
-        result, _ = self.run_model([{'sections':[self.section(), self.section(source_ids=[], frame_ids=[], supplement=True)]}])
-        self.assertIn('AI 补充，需核对', result['content'])
+        result, _ = self.run_model([self.draft(sections=[self.section(), self.section(source_ids=[], frame_ids=[], supplement=True)])])
+        body = result['content'].split('## 概述')[-1]
+        self.assertIn('AI 补充，需核对', body)
+
+    def test_missing_glossary_is_retained_and_repaired_once(self):
+        bad, good = self.draft(terms=[]), self.draft()
+        result, calls = self.run_model([bad, good])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1]['validation_errors'][0]['code'], 'missing_terms')
+        records = self.store.tutorial_attempts(self.doc['id'])
+        self.assertEqual(records[1]['errors'][0]['code'], 'missing_terms')
+        self.assertTrue(result['content'].startswith('## 先认识这些名词'))
+
+    def test_invalid_glossary_is_rejected_without_touching_the_document(self):
+        cases = {
+            'short plain': [{'term':'工具调用','plain':'太短','supplement':False}],
+            'duplicate': self.glossary() + [{'term':'工具调用','plain':'模型说明要做的事，程序负责执行。','supplement':False}],
+            'too many': [{'term':f'名词{i}','plain':'一两句看得懂的说明文字。','supplement':False} for i in range(13)],
+            'not object': ['工具调用'],
+            'supplement type': [{'term':'工具调用','plain':'模型说明要做什么，程序按计划执行。','supplement':'yes'}],
+            'missing term': [{'plain':'模型说明要做什么，程序按计划执行。','supplement':False}],
+        }
+        for label, terms in cases.items():
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                self.run_model([self.draft(terms=terms)])
+        self.assertEqual(self.store.document(self.doc['id'])['content'], self.doc['content'])
+
+    def test_glossary_text_is_literal_not_markdown_or_a_citation(self):
+        terms = [{'term':'伪造[来源:invented]','plain':'听起来像真来源，其实只是解释文字，**不是**证据。','supplement':False}]
+        result, _ = self.run_model([self.draft(terms=terms)])
+        content = result['content']
+        self.assertEqual(_tutorial_evidence(content)[0], [self.sources[0]['id']])
+        self.assertNotIn('[来源:invented]', content)
+        self.assertIn('\\[来源:invented\\]', content)
 
     def test_invalid_structured_draft_is_retained_and_repaired_once(self):
-        bad = {'sections':[self.section(source_ids=['F1'])]}
-        good = {'sections':[self.section(source_ids=['S2'])]}
+        bad = self.draft(sections=[self.section(source_ids=['F1'])])
+        good = self.draft(sections=[self.section(source_ids=['S2'])])
         result, calls = self.run_model([bad, good])
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[1]['draft'], bad)
@@ -83,20 +132,20 @@ class TutorialProtocolTests(unittest.TestCase):
 
     def test_english_structured_body_remains_rejected(self):
         with self.assertRaisesRegex(ValueError, '中文'):
-            self.run_model([{'sections':[self.section(heading='Overview',content='The model produces a plan; the application executes it. ' * 4)]}])
+            self.run_model([self.draft(sections=[self.section(heading='Overview',content='The model produces a plan; the application executes it. ' * 4)])])
 
     def test_chinese_heading_does_not_disguise_english_only_body(self):
         with self.assertRaisesRegex(ValueError, '中文'):
-            self.run_model([{'sections':[self.section(content='The model produces a plan; the application executes it. ' * 4)]}])
+            self.run_model([self.draft(sections=[self.section(content='The model produces a plan; the application executes it. ' * 4)])])
 
     def test_heading_is_plain_text_not_an_image_or_extra_citation(self):
         from markdown_it import MarkdownIt
-        result, _ = self.run_model([{'sections':[self.section(
-            heading='![伪造截图](data:image/png;base64,YQ==) [来源:unknown]', frame_ids=[])]}])
+        result, _ = self.run_model([self.draft(sections=[self.section(
+            heading='![伪造截图](data:image/png;base64,YQ==) [来源:unknown]', frame_ids=[])])])
         images = [t for b in MarkdownIt().parse(result['content']) for t in b.children or [] if t.type == 'image']
         self.assertEqual(images, [])
         self.assertEqual(_tutorial_evidence(result['content'])[0], [self.sources[0]['id']])
 
     def test_html_image_in_body_cannot_bypass_managed_frame_fields(self):
         with self.assertRaisesRegex(ValueError, '图片|截图'):
-            self.run_model([{'sections':[self.section(content='这是中文讲解。' * 12 + '<img src="data:image/png;base64,YQ==">')]}])
+            self.run_model([self.draft(sections=[self.section(content='这是中文讲解。' * 12 + '<img src="data:image/png;base64,YQ==">')])])

@@ -49,6 +49,24 @@ class GenerationContextTests(unittest.TestCase):
         Knowledge(self.store, self.ai, None).ask('如何理解闭包？')
         self.assert_current_preferences()
 
+    def test_follow_up_history_is_carried_as_bounded_context(self):
+        rounds = [{'question': f'第{i}轮问题', 'answer': f'第{i}轮回答'} for i in range(1, 6)]
+        Knowledge(self.store, self.ai, None).ask('上面说的闭包生命周期，再讲一次？', self.doc['id'], history=rounds)
+        conversation = self.ai.calls[-1][1]['conversation']
+        self.assertEqual([turn['question'] for turn in conversation], ['第3轮问题', '第4轮问题', '第5轮问题'])
+        self.assertIn('不是事实依据', self.ai.calls[-1][0])
+        self.assert_current_preferences()
+
+    def test_follow_up_history_rejects_malformed_rounds(self):
+        for history in ([{'question': 1, 'answer': '回答'}], 'not a list', [{}] * 7):
+            with self.subTest(history=history), self.assertRaises(ValueError):
+                Knowledge(self.store, self.ai, None).ask('如何理解闭包？', self.doc['id'], history=history)
+        self.assertEqual(self.ai.calls, [])
+
+    def test_first_ask_omits_conversation_entirely(self):
+        Knowledge(self.store, self.ai, None).ask('如何理解闭包？', self.doc['id'])
+        self.assertNotIn('conversation', self.ai.calls[-1][1])
+
     def test_tutorial_reads_current_preferences_without_embedding(self):
         Knowledge(self.store, self.ai, None).tutorial(self.doc['id'])
         self.assert_current_preferences()

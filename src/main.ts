@@ -1,6 +1,6 @@
 import './style.css';
 import { renderMarkdown, headingId } from './markdown';
-import { libraryTools, notebook, notebookAside, screenshotGallery, mediaJobs, graphView, featureModal, tutorialAttempts } from './notebook-ui';
+import { libraryTools, notebook, notebookAside, screenshotGallery, mediaJobs, graphView, featureModal, tutorialAttempts, timestamp } from './notebook-ui';
 
 type Row = Record<string, any>;
 declare global {
@@ -22,7 +22,7 @@ const api = window.knowledge;
 const root = document.querySelector<HTMLDivElement>('#app')!;
 const state: Row = { view: 'library', data: null, selected: null, detail: null, busy: '', modal: '',
   quiz: null, question: 0, search: '', results: null, answer: null, askScope: '', sourceTab: false,
-  tagFilter: '', bookmarkFilter: false, graph: null, jobs: [] };
+  tagFilter: '', bookmarkFilter: false, graph: null, jobs: [], followUps: [], followUpDraft: '' };
 let draftTimer: ReturnType<typeof setTimeout> | undefined;
 const pendingDocumentRefresh = new Set<string>();
 const escape = (x: unknown) => String(x ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
@@ -104,6 +104,26 @@ function library() {
     <div class="tip-card">${icon('link')}<div><strong>知识之间，也会相互照亮</strong><p>打开一份资料，发现相关教程；确认关联后，问答时能一起查阅。</p></div>${button('nav', '了解知识关联 ' + icon('arrow'), 'button text-button', 'data-view="relations"')}</div>`;
 }
 
+function followUpPanel() {
+  const rounds: Row[] = state.followUps || [];
+  const busy = Boolean(state.busy);
+  return `<div class="context-box follow-up" data-testid="follow-up">
+    <h3>还不懂？继续追问</h3>
+    <p>围绕这份资料继续问${state.data?.has_api_key ? '' : '（需先在「模型与设置」配置 AI 服务）'}；上一轮问答会一起交给模型，回答仍必须带原文依据。</p>
+    <form id="follow-up-form">
+      <label class="sr-only" for="follow-up-question">追问内容</label>
+      <textarea id="follow-up-question" name="question" maxlength="2000" placeholder="例如：上面那个例子，能用生活里的场景再讲一遍吗？" ${busy ? 'disabled' : ''}>${e(state.followUpDraft || '')}</textarea>
+      <div class="follow-up-actions"><small>${rounds.length ? `已追问 ${rounds.length} 次 · 仅本次打开有效` : 'Ctrl + Enter 发送'}</small><button class="button primary" type="submit" ${busy ? 'disabled' : ''}>${busy ? '追问中…' : '追问'}</button></div>
+    </form>
+    ${rounds.length ? `<div class="follow-up-thread">${rounds.slice().reverse().map((round: Row) => `<div class="follow-up-item">
+      <p class="follow-up-question">${e(round.question)}</p>
+      <div class="follow-up-answer">${markdown(round.answer)}</div>
+      <div class="follow-up-sources">${(round.citations || []).map((s: Row) => `<button class="follow-up-source" data-action="citation" data-id="${e(s.id)}" data-doc="${e(s.document_id || state.selected)}">原文${typeof s.start === 'number' ? ' · ' + timestamp(s.start) : ''} ↗</button>`).join('')}</div>
+      ${round.notice ? `<p class="follow-up-notice">${e(round.notice)}</p>` : ''}
+    </div>`).join('')}</div>` : ''}
+  </div>`;
+}
+
 function detail() {
   const { document: doc, segments, relations } = state.detail;
   const active = relations.filter((r: Row) => r.status !== 'rejected');
@@ -111,7 +131,7 @@ function detail() {
     <div class="page-heading"><div><div class="eyebrow">YOUR KNOWLEDGE, WITH SOURCES</div><h1>${e(doc.title)}</h1><p>${date(doc.updated_at)} 更新 · ${segments.length} 个来源片段 · 选中文字可收藏</p></div><div class="toolbar">${button('toggle-note-bookmark', state.detail.notebook?.bookmarked ? '★ 已加书签' : '☆ 笔记书签')}${button('edit', '编辑')}${button('versions', '版本历史')}${button('export', '导出')}${button('delete-document', '删除', 'button danger-quiet')}</div></div>
     <div class="reading-layout"><section class="paper"><div class="paper-tabs">${button('tab-tutorial', '资料正文', `tab ${!state.sourceTab ? 'active' : ''}`)}${button('tab-source', '来源片段', `tab ${state.sourceTab ? 'active' : ''}`)}<span></span>${button('bookmark', icon('star') + ' 收藏选中内容', 'button subtle')}</div>
       ${state.sourceTab ? `<div class="source-list">${segments.map((s: Row, i: number) => `<div class="source-block" id="source-${s.id}"><div><span class="pill">来源 ${i + 1}${s.start != null ? ` · ${Math.floor(s.start / 60)}:${String(Math.floor(s.start % 60)).padStart(2, '0')}` : ''}</span>${s.url ? button('source-video', '跳转视频 ↗', 'button text-button', `data-url="${e(s.url)}" data-time="${s.start || 0}"`) : ''}</div><p>${e(s.text)}</p>${button('bookmark-segment', '收藏此段', 'button text-button', `data-id="${s.id}"`)}</div>`).join('')}</div>` : `<article id="reading-content" class="prose">${markdown(doc.content)}</article>`}</section>
-      <aside class="context-panel">${notebookAside(state.detail)}<div class="context-box"><span class="mini-icon">${icon('link')}</span><h3>与这份资料相关</h3><p>跨过课程边界，连接同一份理解。</p><div class="stack-actions">${button('related-local', '发现关键词关联', 'button')}${button('related-ai', 'AI 分析关联', 'button primary')}</div>${active.map((r: Row) => `<div class="related-mini"><span class="pill">${relationNames[r.kind]}</span><button class="inline-title" data-action="document" data-id="${r.a === doc.id ? r.b : r.a}">${e(r.a === doc.id ? r.b_title : r.a_title)} ↗</button><p>${e(r.reason)}</p>${relationSources(r)}${r.status === 'suggested' ? `${button('confirm-relation', '确认关联', 'button tiny', `data-id="${r.id}"`)} ${button('reject-relation', '忽略', 'button text-button tiny', `data-id="${r.id}"`)}` : '<span class="confirmed">✓ 已确认</span>'}</div>`).join('') || '<div class="mini-empty">发现关联后，会在这里展示具体原因。</div>'}</div>
+      <aside class="context-panel">${followUpPanel()}${notebookAside(state.detail)}<div class="context-box"><span class="mini-icon">${icon('link')}</span><h3>与这份资料相关</h3><p>跨过课程边界，连接同一份理解。</p><div class="stack-actions">${button('related-local', '发现关键词关联', 'button')}${button('related-ai', 'AI 分析关联', 'button primary')}</div>${active.map((r: Row) => `<div class="related-mini"><span class="pill">${relationNames[r.kind]}</span><button class="inline-title" data-action="document" data-id="${r.a === doc.id ? r.b : r.a}">${e(r.a === doc.id ? r.b_title : r.a_title)} ↗</button><p>${e(r.reason)}</p>${relationSources(r)}${r.status === 'suggested' ? `${button('confirm-relation', '确认关联', 'button tiny', `data-id="${r.id}"`)} ${button('reject-relation', '忽略', 'button text-button tiny', `data-id="${r.id}"`)}` : '<span class="confirmed">✓ 已确认</span>'}</div>`).join('') || '<div class="mini-empty">发现关联后，会在这里展示具体原因。</div>'}</div>
       <div class="context-box mint"><h3>把理解再向前一步</h3><p>围绕这份资料提问，或用十道题检验掌握情况。</p>${button('ask-current', icon('chat') + ' 问问这份资料', 'button full')}${button('review-current', icon('quiz') + ' 开始十题练习', 'button full')}${button('generate-tutorial', 'AI 整理为中文教程', 'button text-button full')}</div></aside></div>${screenshotGallery(state.detail.assets || [])}${tutorialAttempts(state.detail.tutorial_attempts || [])}`;
 }
 
@@ -214,6 +234,7 @@ function render() {
 
 async function openDoc(id: string) {
   state.detail = await api.call('document', { id }); state.view = 'library'; state.selected = id; state.sourceTab = false; state.modal = '';
+  state.followUps = []; state.followUpDraft = '';
 }
 
 function scrollToHeading(value: string, isId = false) {
@@ -256,6 +277,7 @@ function invalidateEditedSource(documentId: string) {
 
 root.addEventListener('input', event => {
   const target = event.target as HTMLInputElement;
+  if (target.id === 'follow-up-question') { state.followUpDraft = (event.target as HTMLTextAreaElement).value; return; }
   if (target.id !== 'short-answer') return;
   state.quiz.answers[state.quiz.questions[state.question].id] = target.value;
   const status = document.querySelector('#draft-state'); if (status) status.textContent = '正在保存…';
@@ -406,6 +428,17 @@ root.addEventListener('submit', async event => {
   if (form.id === 'edit-form') { await work('保存修改…', async () => { await api.call('update_document', { ...values, id: state.selected }); invalidateEditedSource(state.selected); await refresh(); await openDoc(state.selected); }); return; }
   if (form.id === 'search-form') { if (!values.query.trim()) return; state.search = values.query; await work('检索知识库…', async () => { state.results = await api.call('search', { query: values.query }); state.view = 'search'; }); return; }
   if (form.id === 'ask-form') { state.lastQuestion = values.question; state.askScope = values.document_id; await work('正在检索资料并组织回答…', async () => { state.answer = await api.call('ask', { question: values.question, document_id: values.document_id || null }); await refresh(); }); }
+  if (form.id === 'follow-up-form') {
+    const question = (values.question || '').trim();
+    if (!question) { toast('先写下你想追问的问题'); return; }
+    const history = (state.followUps || []).slice(-3).map((round: Row) => ({ question: round.question, answer: round.answer }));
+    state.followUpDraft = '';
+    await work('正在追问…', async () => {
+      const data = await api.call('ask', { question, document_id: state.selected, history });
+      state.followUps = [...(state.followUps || []), { question, answer: data.answer, citations: data.citations || [], notice: data.notice || '' }];
+    });
+    return;
+  }
 });
 
 api.onClosing(() => {
@@ -414,6 +447,7 @@ api.onClosing(() => {
 root.addEventListener('keydown', event => {
   const target = event.target as Element;
   if ((event.key === 'Enter' || event.key === ' ') && target.matches('.graph-node')) { event.preventDefault(); target.dispatchEvent(new MouseEvent('click', {bubbles:true})); }
+  if (target.id === 'follow-up-question' && event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); (target as HTMLTextAreaElement).form?.requestSubmit(); }
 });
 
 let polling = false;

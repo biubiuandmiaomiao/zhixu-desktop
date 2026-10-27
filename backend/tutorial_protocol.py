@@ -25,6 +25,49 @@ def _clock(seconds):
     return f'{value // 3600:02}:{value // 60 % 60:02}:{value % 60:02}' if value >= 3600 else f'{value // 60:02}:{value % 60:02}'
 
 
+def _inline_text(value):
+    """Keep model-written glossary text literal instead of Markdown structure."""
+    return re.sub(r'([\\`*_{}\[\]()#+.!<>|~\-])', r'\\\1', re.sub(r'\s+', ' ', str(value)).strip())
+
+
+def tutorial_terms(result):
+    """The glossary the reader meets before the tutorial body.
+
+    The model explains the terms; this module only checks bounds and renders
+    them, so a missing or invented structure cannot reach the reader.
+    """
+    terms = result.get('terms')
+    if not isinstance(terms, list) or not terms:
+        raise TutorialProtocolError('missing_terms',
+                                    '教程须先用 terms 解释本资料里的专业名词（1–12 个），每个字段为 term 与 plain')
+    if len(terms) > 12:
+        raise TutorialProtocolError('invalid_terms', '教程 terms 最多 12 个名词')
+    cleaned, seen = [], set()
+    for index, item in enumerate(terms, 1):
+        if not isinstance(item, dict):
+            raise TutorialProtocolError('invalid_terms', f'第 {index} 个名词必须是对象')
+        term, plain = item.get('term'), item.get('plain')
+        supplement = item.get('supplement', False)
+        if not isinstance(term, str) or not 1 <= len(term.strip()) <= 40:
+            raise TutorialProtocolError('invalid_terms', f'第 {index} 个名词 term 须为 1–40 字')
+        if not isinstance(plain, str) or not 8 <= len(plain.strip()) <= 300:
+            raise TutorialProtocolError('invalid_terms', f'第 {index} 个名词解释须为 8–300 字')
+        if not isinstance(supplement, bool):
+            raise TutorialProtocolError('invalid_terms', f'第 {index} 个名词 supplement 须为布尔值')
+        key = term.strip().casefold()
+        if key in seen:
+            raise TutorialProtocolError('duplicate_terms', '名词重复：' + term.strip())
+        seen.add(key)
+        cleaned.append({'term': _inline_text(term), 'plain': _inline_text(plain), 'supplement': supplement})
+    return cleaned
+
+
+def render_glossary(terms):
+    return ['## 先认识这些名词'] + [
+        '- **' + item['term'] + '**：' + item['plain'] + ('（AI 补充，需核对）' if item['supplement'] else '')
+        for item in terms]
+
+
 def render_tutorial(result, sources, images):
     # Legacy persisted/provider adapters still receive the original strict validator.
     if 'sections' not in result:
@@ -32,11 +75,12 @@ def render_tutorial(result, sources, images):
     sections = result['sections']
     if not isinstance(sections, list) or not 1 <= len(sections) <= 80:
         raise TutorialProtocolError('invalid_sections', '教程 sections 必须为 1 到 80 个分节')
+    terms = tutorial_terms(result)
     source_map = {s['id']: s for s in sources}
     source_map.update({f'S{i}': s for i, s in enumerate(sources, 1)})
     frame_map = {image['id']: image for image in images or []}
     frame_map.update({f'F{i}': image for i, image in enumerate(images or [], 1)})
-    parts = []
+    parts = render_glossary(terms)
     for index, section in enumerate(sections, 1):
         if not isinstance(section, dict):
             raise TutorialProtocolError('invalid_section', '教程分节必须为对象', index)

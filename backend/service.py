@@ -122,7 +122,7 @@ class Service:
         if action == 'search':
             return knowledge.search(args['query'], args.get('document_id'))
         if action == 'ask':
-            return knowledge.ask(args['question'], args.get('document_id'))
+            return knowledge.ask(args['question'], args.get('document_id'), history=args.get('history'))
         if action == 'generate_quiz':
             return review.generate(args.get('document_id'))
         if action == 'quiz':
