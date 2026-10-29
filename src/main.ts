@@ -30,6 +30,7 @@ const escape = (x: unknown) => String(x ?? '').replace(/[&<>"']/g, c => ({ '&': 
 const e = escape;
 const typeNames: Row = { single: '单选题', multiple: '多选题', short: '简答题' };
 const relationNames: Row = { shared: '同一知识点', prerequisite: '前置知识 → 进阶', supplement: '补充案例', difference: '内容差异' };
+const entityKindNames: Row = { person: '人物', org: '组织', product: '产品', work: '作品', place: '地点', tech: '技术', concept: '概念' };
 const icon = (name: string) => {
   const paths: Record<string, string> = {
     book: '<path d="M4 4h6a3 3 0 0 1 3 3v14a4 4 0 0 0-4-2H4z"/><path d="M13 7a3 3 0 0 1 3-3h5v15h-5a4 4 0 0 0-3 2"/>',
@@ -132,7 +133,7 @@ function detail() {
     <div class="page-heading"><div><div class="eyebrow">YOUR KNOWLEDGE, WITH SOURCES</div><h1>${e(doc.title)}</h1><p>${date(doc.updated_at)} 更新 · ${segments.length} 个来源片段 · 选中文字可收藏</p></div><div class="toolbar">${button('toggle-note-bookmark', state.detail.notebook?.bookmarked ? '★ 已加书签' : '☆ 笔记书签')}${button('edit', '编辑')}${button('versions', '版本历史')}${button('export', '导出')}${button('delete-document', '删除', 'button danger-quiet')}</div></div>
     <div class="reading-layout"><section class="paper"><div class="paper-tabs">${button('tab-tutorial', '资料正文', `tab ${!state.sourceTab ? 'active' : ''}`)}${button('tab-source', '来源片段', `tab ${state.sourceTab ? 'active' : ''}`)}<span></span>${button('bookmark', icon('star') + ' 收藏选中内容', 'button subtle')}</div>
       ${state.sourceTab ? `<div class="source-list">${segments.map((s: Row, i: number) => `<div class="source-block" id="source-${s.id}"><div><span class="pill">来源 ${i + 1}${s.start != null ? ` · ${Math.floor(s.start / 60)}:${String(Math.floor(s.start % 60)).padStart(2, '0')}` : ''}</span>${s.url ? button('source-video', '跳转视频 ↗', 'button text-button', `data-url="${e(s.url)}" data-time="${s.start || 0}"`) : ''}</div><p>${e(s.text)}</p>${button('bookmark-segment', '收藏此段', 'button text-button', `data-id="${s.id}"`)}</div>`).join('')}</div>` : `<article id="reading-content" class="prose">${markdown(doc.content)}</article>`}</section>
-      <aside class="context-panel">${followUpPanel()}${notebookAside(state.detail)}<div class="context-box"><span class="mini-icon">${icon('link')}</span><h3>与这份资料相关</h3><p>跨过课程边界，连接同一份理解。</p><div class="stack-actions">${button('related-local', '发现关键词关联', 'button')}${button('related-ai', 'AI 分析关联', 'button primary')}</div>${active.map((r: Row) => `<div class="related-mini"><span class="pill">${relationNames[r.kind]}</span><button class="inline-title" data-action="document" data-id="${r.a === doc.id ? r.b : r.a}">${e(r.a === doc.id ? r.b_title : r.a_title)} ↗</button><p>${e(r.reason)}</p>${relationSources(r)}${r.status === 'suggested' ? `${button('confirm-relation', '确认关联', 'button tiny', `data-id="${r.id}"`)} ${button('reject-relation', '忽略', 'button text-button tiny', `data-id="${r.id}"`)}` : '<span class="confirmed">✓ 已确认</span>'}</div>`).join('') || '<div class="mini-empty">发现关联后，会在这里展示具体原因。</div>'}</div>
+      <aside class="context-panel">${followUpPanel()}${notebookAside(state.detail)}<div class="context-box"><span class="mini-icon">${icon('link')}</span><h3>与这份资料相关</h3><p>按「共同实体」查找关联，泛词共现不再算关联。</p><div class="stack-actions">${button('related-local', '查找实体关联', 'button')}${button('related-ai', 'AI 判断关联类型', 'button primary')}</div>${active.map((r: Row) => `<div class="related-mini"><span class="pill">${relationNames[r.kind]}</span><button class="inline-title" data-action="document" data-id="${r.a === doc.id ? r.b : r.a}">${e(r.a === doc.id ? r.b_title : r.a_title)} ↗</button><p>${e(r.reason)}</p>${(r.entities || []).length ? `<div class="relation-entities">${r.entities.slice(0, 4).map((x: Row) => `<span class="pill">${e(x.name)}</span>`).join('')}</div>` : ''}${relationSources(r)}${r.status === 'suggested' ? `${button('confirm-relation', '确认关联', 'button tiny', `data-id="${r.id}"`)} ${button('reject-relation', '忽略', 'button text-button tiny', `data-id="${r.id}"`)}` : '<span class="confirmed">✓ 已确认</span>'}</div>`).join('') || '<div class="mini-empty">发现关联后，会在这里展示具体原因。</div>'}</div>
       <div class="context-box mint"><h3>把理解再向前一步</h3><p>围绕这份资料提问，或用十道题检验掌握情况。</p>${button('ask-current', icon('chat') + ' 问问这份资料', 'button full')}${button('review-current', icon('quiz') + ' 开始十题练习', 'button full')}${button('generate-tutorial', 'AI 整理为中文教程', 'button text-button full')}</div></aside></div>${screenshotGallery(state.detail.assets || [])}${tutorialAttempts(state.detail.tutorial_attempts || [])}`;
 }
 
@@ -146,8 +147,12 @@ function relationSources(relation: Row) {
 
 function relationView() {
   const rows = state.data.relations.filter((r: Row) => r.status !== 'rejected');
-  return `<div class="page-heading"><div class="eyebrow">CONNECT THE DOTS</div><h1>知识关联</h1><p>相似、互补、前置与差异，让零散教程连接起来。自动发现的关系需要你确认。</p></div>
-    ${rows.length ? `<div class="relation-list">${rows.map((r: Row) => `<div class="relation-card"><div class="relation-nodes">${button('document', icon('book') + e(r.a_title), 'relation-node', `data-id="${r.a}"`)}<div class="relation-thread"><span>${relationNames[r.kind]}</span><i></i></div>${button('document', icon('book') + e(r.b_title), 'relation-node', `data-id="${r.b}"`)}</div><p>${e(r.reason)}</p>${relationSources(r)}<div class="toolbar"><span class="${r.status === 'confirmed' ? 'confirmed' : 'muted'}">${r.status === 'confirmed' ? '✓ 已确认' : '待确认的关联建议'}</span><span class="spacer"></span>${r.status === 'suggested' ? button('confirm-relation', '确认关联', 'button primary tiny', `data-id="${r.id}"`) : ''}${button('reject-relation', '移除关联', 'button subtle tiny', `data-id="${r.id}"`)}</div></div>`).join('')}</div>` : empty('让教程之间建立联系', '导入两份有关联的资料，打开其中一份，点击“发现关键词关联”或“AI 分析关联”。', 'nav', '前往知识库')}`;
+  const index = state.data.entity_index || {};
+  const indexed = Object.keys(index).length;
+  const total = state.data.documents.length;
+  return `<div class="page-heading"><div class="eyebrow">CONNECT THE DOTS</div><h1>知识关联</h1><p>关联由「共同实体」产生：两份资料提到同一个人物、产品、技术或概念才会建立关系；泛词共现不再算关联。自动发现的关系需要你确认。</p></div>
+    <div class="info-banner">${icon('link')}已建立实体索引 ${indexed} / ${total} 份资料。${indexed < total ? '新导入的资料需要先抽取实体。' : '问答时会带上已确认关联资料的原文。'}<span class="spacer"></span>${button('build-entity-index', indexed ? '补充抽取实体' : '建立实体索引', 'button primary')}</div>
+    ${rows.length ? `<div class="relation-list">${rows.map((r: Row) => `<div class="relation-card"><div class="relation-nodes">${button('document', icon('book') + e(r.a_title), 'relation-node', `data-id="${r.a}"`)}<div class="relation-thread"><span>${relationNames[r.kind]}</span><i></i></div>${button('document', icon('book') + e(r.b_title), 'relation-node', `data-id="${r.b}"`)}</div><p>${e(r.reason)}</p>${(r.entities || []).length ? `<div class="relation-entities">${r.entities.map((x: Row) => `<span class="pill">${e(entityKindNames[x.kind] || '概念')} · ${e(x.name)}</span>`).join('')}</div>` : ''}${relationSources(r)}<div class="toolbar"><span class="${r.status === 'confirmed' ? 'confirmed' : 'muted'}">${r.status === 'confirmed' ? '✓ 已确认' : '待确认的关联建议'}</span><span class="spacer"></span>${r.status === 'suggested' ? button('confirm-relation', '确认关联', 'button primary tiny', `data-id="${r.id}"`) : ''}${button('reject-relation', '移除关联', 'button subtle tiny', `data-id="${r.id}"`)}</div></div>`).join('')}</div>` : empty('让教程之间建立联系', '先点「建立实体索引」，再打开一份资料点「查找实体关联」。', 'nav', '前往知识库')}`;
 }
 
 function memoryView() {
@@ -361,7 +366,7 @@ root.addEventListener('click', async event => {
     if (!window.confirm('删除这份资料？关联收藏和含有该来源的练习也会删除，此操作无法撤销。')) { state.modal = ''; return; }
   }
   if (a === 'restore-version' && !window.confirm('恢复这个版本？当前版本仍保留在历史中，相关旧来源索引、问答与练习将重新校验。')) return;
-  await work(({ 'import-file': '读取资料文件…', 'generate-tutorial': '正在根据来源整理教程…', 'related-ai': '正在分析教程之间的关系…', 'build-index': 'mem0 正在抽取并保存知识，首次同步可能需要几分钟…' } as Row)[a!] || '处理中…', async () => {
+  await work(({ 'import-file': '读取资料文件…', 'generate-tutorial': '正在根据来源整理教程…', 'related-ai': '正在分析教程之间的关系…', 'build-entity-index': '正在抽取实体并建立索引…', 'build-index': 'mem0 正在抽取并保存知识，首次同步可能需要几分钟…' } as Row)[a!] || '处理中…', async () => {
     if (a === 'document') await openDoc(id);
     if (a === 'external-link') await api.openLink(target.dataset.url!);
     if (a === 'note-link') await followNoteLink(target.dataset.doc || state.selected,target.dataset.target!);
@@ -382,6 +387,7 @@ root.addEventListener('click', async event => {
     if (a === 'delete-document') { await api.call('delete_document', { id: state.selected }); state.detail = null; state.selected = null; state.modal = ''; await refresh(); }
     if (a === 'delete-card' || a === 'delete-memory') { await api.call(a.replace('-', '_'), { id }); await refresh(); }
     if (a === 'related-local' || a === 'related-ai') { await api.call('related', { id: state.selected, use_ai: a === 'related-ai' }); await refresh(); await openDoc(state.selected); toast('关联候选已更新，可确认或忽略'); }
+    if (a === 'build-entity-index') { const result = await api.call('build_entity_index', { limit: 8 }); await refresh(); toast(`已为 ${result.documents.length} 份资料抽取 ${result.entities} 个实体`); }
     if (a === 'confirm-relation' || a === 'reject-relation') { await api.call('set_relation', { id, status: a === 'confirm-relation' ? 'confirmed' : 'rejected' }); await refresh(); if (state.detail) await openDoc(state.selected); }
     if (a === 'open-quiz') { state.quiz = await api.call('quiz', { id }); state.question = 0; }
     if (a === 'test-model') { const result = await api.call('test_model'); toast(result.message); }

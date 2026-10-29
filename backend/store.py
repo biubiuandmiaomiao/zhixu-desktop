@@ -79,6 +79,26 @@ class Store:
                 run_id TEXT NOT NULL, attempt INTEGER NOT NULL, content TEXT NOT NULL,
                 errors TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS tutorial_attempts_document ON tutorial_attempts(document_id, created_at);
+            CREATE TABLE IF NOT EXISTS entities(
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, norm TEXT NOT NULL UNIQUE,
+                kind TEXT NOT NULL, created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS entity_aliases(
+                entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+                norm TEXT NOT NULL, alias TEXT NOT NULL, PRIMARY KEY(entity_id, norm));
+            CREATE INDEX IF NOT EXISTS entity_aliases_norm ON entity_aliases(norm);
+            CREATE TABLE IF NOT EXISTS entity_mentions(
+                id TEXT PRIMARY KEY,
+                entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+                segment_id TEXT REFERENCES segments(id) ON DELETE CASCADE,
+                document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                quote TEXT NOT NULL, created_at TEXT NOT NULL,
+                UNIQUE(entity_id, segment_id));
+            CREATE INDEX IF NOT EXISTS entity_mentions_document ON entity_mentions(document_id);
+            CREATE INDEX IF NOT EXISTS entity_mentions_entity ON entity_mentions(entity_id);
+            CREATE TABLE IF NOT EXISTS relation_entities(
+                relation_id TEXT NOT NULL REFERENCES relations(id) ON DELETE CASCADE,
+                entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+                PRIMARY KEY(relation_id, entity_id));
         ''')
         self.db.commit()
         if 'raw_result' not in {r['name'] for r in self.db.execute('PRAGMA table_info(tutorial_attempts)')}:
@@ -196,6 +216,7 @@ class Store:
             self.notebook.deleted(document_id)
             self.db.execute('DELETE FROM documents WHERE id=?', (document_id,))
             self.notebook.refresh_links()
+        self.prune_entities()
 
     def invalidate_sources(self, document_id):
         """Invalidate derived factual records before replacing active evidence."""
@@ -335,7 +356,137 @@ class Store:
         for row in rows:
             row['evidence'] = self.rows('''SELECT s.id,s.document_id,d.title FROM relation_evidence e
                 JOIN segments s ON s.id=e.segment_id JOIN documents d ON d.id=s.document_id WHERE e.relation_id=?''', (row['id'],))
+            row['entities'] = self.rows('''SELECT e.id,e.name,e.kind FROM relation_entities re
+                JOIN entities e ON e.id=re.entity_id WHERE re.relation_id=? ORDER BY e.name''', (row['id'],))
         return rows
+
+    # ---- entity layer -------------------------------------------------------
+    # Entities are the join key for cross-document relations: a relation exists
+    # because two documents mention the same canonical entity, not because their
+    # text happens to share a character bigram.
+    def entity_by_norm(self, norm):
+        rows = self.rows('SELECT * FROM entities WHERE norm=?', (norm,))
+        if rows:
+            return rows[0]
+        rows = self.rows('SELECT e.* FROM entity_aliases a JOIN entities e ON e.id=a.entity_id WHERE a.norm=?', (norm,))
+        return rows[0] if rows else None
+
+    def upsert_entity(self, name, kind='concept', aliases=()):
+        from .entities import normalize_entity, normalize_entity_kind, find_similar_entity
+        display = normalize_entity(name)
+        if not display:
+            raise ValueError('无效的实体名称')
+        norm = display.lower()
+        kind = normalize_entity_kind(kind)
+        existing = self.entity_by_norm(norm)
+        if existing:
+            return existing['id']
+        # Deterministic fuzzy merge: a near-identical spelling reuses the canonical
+        # entity and is remembered as an alias instead of creating a twin.
+        similar = find_similar_entity(self, display, kind)
+        if similar:
+            with self.db:
+                self.db.execute('INSERT OR IGNORE INTO entity_aliases VALUES(?,?,?)', (similar['id'], norm, display))
+            return similar['id']
+        with self.db:
+            self.db.execute('INSERT OR IGNORE INTO entities VALUES(?,?,?,?,?)', (uid(), display, norm, kind, now()))
+            row = self.rows('SELECT id FROM entities WHERE norm=?', (norm,))
+            entity_id = row[0]['id'] if row else None
+            for alias in aliases or ():
+                alias_display = normalize_entity(alias)
+                if not alias_display:
+                    continue
+                alias_norm = alias_display.lower()
+                if alias_norm == norm or entity_id is None:
+                    continue
+                self.db.execute('INSERT OR IGNORE INTO entity_aliases VALUES(?,?,?)', (entity_id, alias_norm, alias_display))
+        if entity_id:
+            return entity_id
+        found = self.entity_by_norm(norm)
+        if not found:
+            raise ValueError('实体写入失败')
+        return found['id']
+
+    def add_entity_mention(self, entity_id, document_id, segment_id, quote):
+        with self.db:
+            self.db.execute('''INSERT OR IGNORE INTO entity_mentions(id,entity_id,segment_id,document_id,quote,created_at)
+                               SELECT ?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM documents WHERE id=?)''',
+                            (uid(), entity_id, segment_id, document_id, str(quote)[:500], now(), document_id))
+
+    def document_entities(self, document_id):
+        return self.rows('''SELECT e.id AS entity_id,e.name,e.kind,COUNT(m.id) AS mentions
+                            FROM entity_mentions m JOIN entities e ON e.id=m.entity_id
+                            WHERE m.document_id=? GROUP BY e.id ORDER BY mentions DESC,e.name''', (document_id,))
+
+    def document_entity_mentions(self, document_id):
+        return self.rows('''SELECT m.entity_id,m.segment_id,m.quote,e.name,e.kind FROM entity_mentions m
+                            JOIN entities e ON e.id=m.entity_id WHERE m.document_id=? ORDER BY e.name''', (document_id,))
+
+    def entity_index_counts(self):
+        return {r['document_id']: r['entities'] for r in self.rows(
+            'SELECT document_id,COUNT(DISTINCT entity_id) AS entities FROM entity_mentions GROUP BY document_id')}
+
+    def entity_document_counts(self):
+        return {r['entity_id']: r['documents'] for r in self.rows(
+            'SELECT entity_id,COUNT(DISTINCT document_id) AS documents FROM entity_mentions GROUP BY entity_id')}
+
+    def set_relation_entities(self, relation_id, entity_ids):
+        with self.db:
+            for entity_id in dict.fromkeys(entity_ids or []):
+                self.db.execute('INSERT OR IGNORE INTO relation_entities VALUES(?,?)', (relation_id, entity_id))
+
+    def entity_ids_in_text(self, text, limit=8):
+        """Canonical entities whose name or alias literally occurs in the query."""
+        lowered = str(text or '').lower()
+        if not lowered:
+            return []
+        found = []
+        for row in self.rows('SELECT id,norm FROM entities'):
+            if row['norm'] and row['norm'] in lowered and row['id'] not in found:
+                found.append(row['id'])
+        for row in self.rows('SELECT entity_id,norm FROM entity_aliases'):
+            if row['norm'] in lowered and row['entity_id'] not in found:
+                found.append(row['entity_id'])
+        return found[:limit]
+
+    def entity_link_sources(self, entity_ids, exclude_document_id=None, limit=4):
+        """Segments that mention the given entities, for one-hop cross-note evidence."""
+        ids = [entity_id for entity_id in dict.fromkeys(entity_ids or []) if entity_id]
+        if not ids:
+            return []
+        placeholders = ','.join('?' for _ in ids)
+        sql = f'''SELECT s.id,s.document_id,s.text,s.start,d.title,e.name AS entity_name
+                  FROM entity_mentions m JOIN segments s ON s.id=m.segment_id
+                  JOIN documents d ON d.id=m.document_id JOIN entities e ON e.id=m.entity_id
+                  WHERE m.entity_id IN ({placeholders})'''
+        args = list(ids)
+        if exclude_document_id:
+            sql += ' AND m.document_id<>?'
+            args.append(exclude_document_id)
+        sql += ' ORDER BY e.name LIMIT ?'
+        args.append(limit)
+        rows, seen = [], set()
+        for row in self.rows(sql, args):
+            if row['id'] in seen:
+                continue
+            seen.add(row['id'])
+            rows.append({**row, 'retrieval': '实体关联'})
+        return rows
+
+    def prune_entities(self):
+        with self.db:
+            self.db.execute('DELETE FROM entities WHERE id NOT IN (SELECT DISTINCT entity_id FROM entity_mentions)')
+
+    def prune_keyword_relations(self, document_id):
+        """Drop pure keyword suggestions once a document has an entity index.
+
+        Only unconfirmed, non-AI, entity-less suggestions are removed; confirmed
+        relations and AI-judged ones keep their place.
+        """
+        with self.db:
+            self.db.execute('''DELETE FROM relations WHERE status='suggested' AND (a=? OR b=?)
+                               AND id NOT IN (SELECT relation_id FROM relation_entities)
+                               AND reason LIKE '关键词候选%' ''', (document_id, document_id))
 
     def sample_sources(self, document_id=None, limit=12):
         if document_id == '__cards__':

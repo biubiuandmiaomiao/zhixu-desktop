@@ -39,7 +39,8 @@ class Service:
                     'conversations': self.store.conversations(), 'data_directory': str(self.store.directory),
                     'jobs': self.store.rows('SELECT id,kind,status,error,created_at FROM jobs ORDER BY created_at DESC LIMIT 5'),
                     'mem0': self.mem0.status(provider), 'media_jobs': self.media.status(), 'media_active': self.media.activity()['active'],
-                    'has_search_key': bool(search_key), 'web_search_providers': provider_labels()}
+                    'has_search_key': bool(search_key), 'web_search_providers': provider_labels(),
+                    'entity_index': self.store.entity_index_counts()}
         if action == 'document':
             return {'document': self.store.document(args['id']), 'segments': self.store.segments(args['id']),
                     'relations': self.store.relations(args['id']), 'notebook': self.store.notebook.metadata(args['id']),
@@ -117,6 +118,9 @@ class Service:
             return True
         if action == 'related':
             return knowledge.related(args['id'], args.get('use_ai', False))
+        if action == 'build_entity_index':
+            from .entities import build_index
+            return build_index(self.store, provider, args.get('id'), limit=int(args.get('limit', 8)))
         if action == 'set_relation':
             if args['status'] != 'confirmed':
                 self.mem0.remove(['relation:' + args['id']])
