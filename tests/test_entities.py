@@ -112,8 +112,24 @@ class SharedEntityTests(unittest.TestCase):
         self.assertIn('共同实体', relation['reason'])
         self.assertTrue(relation['entities'])
         self.assertEqual(len(relation['evidence']), 2)
+        self.assertGreater(relation['score'], 0)
+        self.assertEqual(relation['proof'], len(relation['entities']))
+        self.assertEqual(relation['top_entity'], relation['entities'][0]['name'])
+        self.assertEqual({row['side'] for row in relation['evidence']}, {'a', 'b'})
+        self.assertTrue(all(row['quote'] for row in relation['evidence']))
         # No LLM call was made: entity relations are deterministic.
         self.assertEqual(knowledge.provider.calls, [])
+
+    def test_relation_strength_refines_instead_of_regressing(self):
+        a = add_doc_with_entities(self.store, 'A', '闭包与装饰器。', ['闭包', '装饰器'])
+        b = add_doc_with_entities(self.store, 'B', '闭包与装饰器。', ['闭包', '装饰器'])
+        first = self.store.suggest_relation(a['id'], b['id'], 'shared', '初次', score=1.2, proof=2, top_entity='闭包')
+        second = self.store.suggest_relation(a['id'], b['id'], 'shared', '再次', score=3.4, proof=3, top_entity='装饰器')
+        self.assertEqual(first['id'], second['id'])
+        relation = next(row for row in self.store.relations(a['id']) if row['id'] == first['id'])
+        self.assertEqual(relation['score'], 3.4)
+        self.assertEqual(relation['proof'], 3)
+        self.assertEqual(relation['top_entity'], '装饰器')
 
     def test_build_index_is_bounded_and_reports_counts(self):
         documents = [self.store.add_document(f'资料 {i}', '闭包捕获外部变量。') for i in range(3)]

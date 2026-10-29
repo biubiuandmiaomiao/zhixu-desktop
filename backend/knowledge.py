@@ -459,11 +459,22 @@ class Knowledge:
                 if kind not in ('shared', 'prerequisite', 'supplement', 'difference') or not isinstance(ai_reason, str):
                     raise ValueError('AI 返回了无效关系，已取消保存')
                 reason = ('mem0 同步暂不可用。' if mem0_failed else '') + '实体共现 + AI 判断：' + ai_reason
-            own_evidence = [entity['segment_id'] for entity in shared if entity.get('segment_id')]
-            other_evidence = [row['segment_id'] for row in self.store.document_entity_mentions(other['id'])
-                              if row['entity_id'] in {entity['id'] for entity in shared} and row['segment_id']]
+            other_mentions = {}
+            for row in self.store.document_entity_mentions(other['id']):
+                if row['segment_id']:
+                    other_mentions.setdefault(row['entity_id'], row)
+            evidence = []
+            for entity in shared[:4]:
+                if entity.get('segment_id'):
+                    evidence.append({'segment_id': entity['segment_id'], 'side': 'a',
+                                     'quote': entity.get('quote'), 'entity_id': entity['id']})
+                mention = other_mentions.get(entity['id'])
+                if mention:
+                    evidence.append({'segment_id': mention['segment_id'], 'side': 'b',
+                                     'quote': mention.get('quote'), 'entity_id': entity['id']})
             relation = self.store.suggest_relation(document['id'], other['id'], kind, reason,
-                                                   evidence=(own_evidence[:1] + other_evidence[:1]))
+                                                   evidence=evidence, score=candidate['weight'],
+                                                   proof=len(shared), top_entity=shared[0]['name'])
             self.store.set_relation_entities(relation['id'], [entity['id'] for entity in shared])
 
     def _relate_by_keywords(self, document, use_ai, mem0_failed):

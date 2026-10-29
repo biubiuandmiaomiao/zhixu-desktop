@@ -104,6 +104,18 @@ class Store:
         if 'raw_result' not in {r['name'] for r in self.db.execute('PRAGMA table_info(tutorial_attempts)')}:
             with self.db:
                 self.db.execute("ALTER TABLE tutorial_attempts ADD COLUMN raw_result TEXT NOT NULL DEFAULT '{}'")
+        # Additive migrations: relation strength and paired evidence quotes.
+        relation_columns = {r['name'] for r in self.db.execute('PRAGMA table_info(relations)')}
+        for name, ddl in (('score', "REAL NOT NULL DEFAULT 0"), ('proof', "INTEGER NOT NULL DEFAULT 1"),
+                          ('top_entity', "TEXT NOT NULL DEFAULT ''")):
+            if name not in relation_columns:
+                with self.db:
+                    self.db.execute(f'ALTER TABLE relations ADD COLUMN {name} {ddl}')
+        evidence_columns = {r['name'] for r in self.db.execute('PRAGMA table_info(relation_evidence)')}
+        for name, ddl in (('entity_id', 'TEXT'), ('side', 'TEXT'), ('quote', 'TEXT')):
+            if name not in evidence_columns:
+                with self.db:
+                    self.db.execute(f'ALTER TABLE relation_evidence ADD COLUMN {name} {ddl}')
         from .notebook import Notebook
         self.notebook = Notebook(self)
 
@@ -326,7 +338,7 @@ class Store:
         with self.db:
             self.db.execute('DELETE FROM memories WHERE id=?', (memory_id,))
 
-    def suggest_relation(self, a, b, kind, reason, evidence=None):
+    def suggest_relation(self, a, b, kind, reason, evidence=None, score=0.0, proof=1, top_entity=''):
         self.document(a)
         self.document(b)
         if a == b or kind not in ('shared', 'prerequisite', 'supplement', 'difference'):
@@ -334,12 +346,29 @@ class Store:
         if kind != 'prerequisite':
             a, b = sorted([a, b])
         with self.db:
-            self.db.execute('INSERT OR IGNORE INTO relations VALUES(?,?,?,?,?,?,?)', (uid(), a, b, kind, reason, 'suggested', now()))
+            self.db.execute('''INSERT OR IGNORE INTO relations(id,a,b,kind,reason,status,created_at,score,proof,top_entity)
+                               VALUES(?,?,?,?,?,?,?,?,?,?)''',
+                            (uid(), a, b, kind, reason, 'suggested', now(), float(score or 0), int(proof or 1), top_entity or ''))
+            # Refinement, not overwrite: keep the strongest observed evidence counts.
+            self.db.execute('''UPDATE relations SET score=MAX(score,?), proof=MAX(proof,?),
+                               top_entity=CASE WHEN ?<>'' THEN ? ELSE top_entity END
+                               WHERE a=? AND b=? AND kind=?''',
+                            (float(score or 0), int(proof or 1), top_entity or '', top_entity or '', a, b, kind))
         relation = self.rows('SELECT * FROM relations WHERE a=? AND b=? AND kind=?', (a, b, kind))[0]
         if evidence and relation['status'] != 'rejected':
             with self.db:
-                for segment_id in evidence:
-                    self.db.execute('INSERT OR IGNORE INTO relation_evidence VALUES(?,?)', (relation['id'], segment_id))
+                for entry in evidence:
+                    if isinstance(entry, dict):
+                        segment_id = entry.get('segment_id')
+                        if not segment_id:
+                            continue
+                        self.db.execute('''INSERT OR IGNORE INTO relation_evidence(relation_id,segment_id,entity_id,side,quote)
+                                           VALUES(?,?,?,?,?)''',
+                                        (relation['id'], segment_id, entry.get('entity_id'),
+                                         entry.get('side'), str(entry.get('quote') or '')[:300]))
+                    else:
+                        self.db.execute('INSERT OR IGNORE INTO relation_evidence(relation_id,segment_id) VALUES(?,?)',
+                                        (relation['id'], entry))
         return relation
 
     def set_relation(self, relation_id, status):
@@ -351,11 +380,14 @@ class Store:
     def relations(self, document_id=None):
         rows = self.rows('''SELECT r.*, da.title AS a_title, db.title AS b_title FROM relations r
                             JOIN documents da ON da.id=r.a JOIN documents db ON db.id=r.b ''' +
-                         ('WHERE r.a=? OR r.b=? ' if document_id else '') + 'ORDER BY r.created_at DESC',
+                         ('WHERE r.a=? OR r.b=? ' if document_id else '') +
+                         'ORDER BY r.score DESC, r.created_at DESC',
                          (document_id, document_id) if document_id else ())
         for row in rows:
-            row['evidence'] = self.rows('''SELECT s.id,s.document_id,d.title FROM relation_evidence e
-                JOIN segments s ON s.id=e.segment_id JOIN documents d ON d.id=s.document_id WHERE e.relation_id=?''', (row['id'],))
+            row['evidence'] = self.rows('''SELECT s.id,s.document_id,d.title,e.entity_id,e.side,e.quote,
+                ent.name AS entity_name FROM relation_evidence e
+                JOIN segments s ON s.id=e.segment_id JOIN documents d ON d.id=s.document_id
+                LEFT JOIN entities ent ON ent.id=e.entity_id WHERE e.relation_id=?''', (row['id'],))
             row['entities'] = self.rows('''SELECT e.id,e.name,e.kind FROM relation_entities re
                 JOIN entities e ON e.id=re.entity_id WHERE re.relation_id=? ORDER BY e.name''', (row['id'],))
         return rows
