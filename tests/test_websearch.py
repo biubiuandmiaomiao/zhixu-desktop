@@ -2,7 +2,7 @@ import io
 import json
 import unittest
 
-from backend.websearch import WebSearch, web_source_rows
+from backend.websearch import WebSearch, _relevant, _search_so, web_source_rows
 
 
 class Response(io.BytesIO):
@@ -62,6 +62,58 @@ class WebSearchTests(unittest.TestCase):
         self.assertEqual(rows[0]['kind'], 'web')
         self.assertEqual(rows[0]['retrieval'], '联网')
         self.assertEqual(rows[0]['url'], 'https://e.com')
+
+    def test_builtin_provider_is_configured_without_a_key(self):
+        self.assertTrue(WebSearch('builtin', '').configured)
+        self.assertEqual(WebSearch('bocha', '').configured, False)
+
+    def test_relevance_check_rejects_off_topic_results(self):
+        self.assertTrue(_relevant('闭包是什么', {'title': '闭包是什么?五分钟了解闭包', 'snippet': '闭包捕获变量'}))
+        self.assertFalse(_relevant('闭包是什么', {'title': '闭_百度百科', 'snippet': '闭的拼音与部首'}))
+        self.assertTrue(_relevant('Python closure', {'title': 'Python closures', 'snippet': 'nested function'}))
+
+    def test_so_results_use_mdurl_and_skip_portal_links(self):
+        markup = ''.join([
+            '<li class="res-list"><style>.a{color:red}</style>',
+            '<h3 class="res-title"><a href="https://www.so.com/link?m=x">闭包是什么?五分钟带你了解闭包 - 知乎</a></h3>',
+            '<div class="res-desc">闭包捕获外部变量，即使外层函数返回仍然保留。</div>',
+            '<span data-mdurl="https://www.so.com/link?m=skip"></span>',
+            '<span data-mdurl="https://zhuanlan.zhihu.com/p/703373072"></span></li>',
+        ])
+        rows = _search_so(Opener(markup.encode('utf-8')), '闭包是什么', 3)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['url'], 'https://zhuanlan.zhihu.com/p/703373072')
+        self.assertIn('闭包是什么', rows[0]['title'])
+        self.assertIn('闭包捕获外部变量', rows[0]['snippet'])
+
+    def test_builtin_falls_back_to_the_second_engine_when_results_are_irrelevant(self):
+        bing = ('<li class="b_algo"><h2><a href="https://baike.baidu.com/closed">闭_百度百科</a></h2>'
+                '<p>闭的拼音是 bi。</p></li>')
+        so = ('<li class="res-list"><h3><a href="https://www.so.com/link?m=x">闭包是什么 - 知乎</a></h3>'
+              '<div class="res-desc">闭包捕获外部变量。</div>'
+              '<span data-mdurl="https://zhuanlan.zhihu.com/p/1"></span></li>')
+
+        class MultiOpener:
+            def __init__(self):
+                self.requests = []
+
+            def open(self, request, timeout=None):
+                self.requests.append(request.full_url)
+                payload = bing if 'bing.com' in request.full_url else so
+                return Response(payload.encode('utf-8'))
+
+        opener = MultiOpener()
+        rows = WebSearch('builtin', '', opener=opener).search('闭包是什么', 3)
+        self.assertEqual(len(opener.requests), 2, 'bing first, then so.com fallback')
+        self.assertEqual(rows[0]['url'], 'https://zhuanlan.zhihu.com/p/1')
+        self.assertIn('闭包', rows[0]['title'])
+
+    def test_builtin_reports_when_every_engine_fails(self):
+        class Broken:
+            def open(self, request, timeout=None):
+                raise OSError('blocked')
+        with self.assertRaisesRegex(ValueError, '没有返回可用结果'):
+            WebSearch('builtin', '', opener=Broken()).search('闭包是什么')
 
 
 if __name__ == '__main__':

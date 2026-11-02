@@ -141,6 +141,33 @@ class GenerationContextTests(unittest.TestCase):
         Knowledge(self.store, ai, None, web_search=web).ask('闭包捕获外部变量是什么？')
         self.assertEqual(len(web.calls), 1)
 
+    def test_explicit_web_request_forces_search_and_off_skips_it(self):
+        class CitesFirst:
+            settings = {}
+            api_key = ''
+            def __init__(self):
+                self.calls = []
+            def json(self, system, payload):
+                self.calls.append((system, payload))
+                return {'answer': '回答。[1]', 'source_ids': [payload['sources'][0]['id']]}
+
+        class FakeWeb:
+            def __init__(self):
+                self.calls = []
+                self.results = [{'title': '外部资料', 'url': 'https://example.com/a', 'snippet': '网络上的解释'}]
+            def search(self, query, limit=4):
+                self.calls.append(query)
+                return list(self.results)
+
+        ai, web = CitesFirst(), FakeWeb()
+        knowledge = Knowledge(self.store, ai, None, web_search=web)
+        result = knowledge.ask('闭包的生命周期是什么？', self.doc['id'], web=True)
+        self.assertEqual(len(web.calls), 1)
+        self.assertTrue(any(source.get('kind') == 'web' for source in ai.calls[-1][1]['sources']))
+        self.assertIn('已按你的要求联网', result['notice'])
+        knowledge.ask('闭包的生命周期是什么？', self.doc['id'], web=False)
+        self.assertEqual(len(web.calls), 1)
+
     def test_web_search_failure_keeps_the_local_answer(self):
         class CitesFirst:
             settings = {}

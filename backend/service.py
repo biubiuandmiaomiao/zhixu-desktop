@@ -6,7 +6,7 @@ from .vectors import VectorIndex
 from .mem0_engine import Mem0Engine
 from .media import MediaJobs
 from .exports import with_embedded_frames
-from .websearch import WebSearch, provider_labels
+from .websearch import WebSearch, provider_labels, default_provider
 
 
 class Service:
@@ -29,7 +29,9 @@ class Service:
         # Credentials stay in process memory; background jobs persist options, never keys.
         self._media_api_key = api_key
         provider = Provider(self.store.settings(), api_key)
-        web = WebSearch(self.store.settings().get('web_search_provider', ''), search_key)
+        setting = self.store.settings().get('web_search_provider')
+        search_provider = default_provider() if not setting else ('' if setting == 'off' else setting)
+        web = WebSearch(search_provider, search_key)
         knowledge = Knowledge(self.store, provider, self.vectors, self.mem0, web if web.configured else None)
         review = Review(self.store, provider, self.mem0)
         if action == 'bootstrap':
@@ -40,6 +42,7 @@ class Service:
                     'jobs': self.store.rows('SELECT id,kind,status,error,created_at FROM jobs ORDER BY created_at DESC LIMIT 5'),
                     'mem0': self.mem0.status(provider), 'media_jobs': self.media.status(), 'media_active': self.media.activity()['active'],
                     'has_search_key': bool(search_key), 'web_search_providers': provider_labels(),
+                    'web_search_ready': web.configured, 'web_search_provider': web.provider,
                     'entity_index': self.store.entity_index_counts()}
         if action == 'document':
             return {'document': self.store.document(args['id']), 'segments': self.store.segments(args['id']),
@@ -130,7 +133,8 @@ class Service:
         if action == 'search':
             return knowledge.search(args['query'], args.get('document_id'))
         if action == 'ask':
-            return knowledge.ask(args['question'], args.get('document_id'), history=args.get('history'))
+            return knowledge.ask(args['question'], args.get('document_id'), history=args.get('history'),
+                                 web=args.get('web'))
         if action == 'generate_quiz':
             return review.generate(args.get('document_id'))
         if action == 'quiz':
