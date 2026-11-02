@@ -151,7 +151,7 @@ function relationView() {
   const indexed = Object.keys(index).length;
   const total = state.data.documents.length;
   return `<div class="page-heading"><div class="eyebrow">CONNECT THE DOTS</div><h1>知识关联</h1><p>关联由「共同实体」产生：两份资料提到同一个人物、产品、技术或概念才会建立关系；泛词共现不再算关联。自动发现的关系需要你确认。</p></div>
-    <div class="info-banner">${icon('link')}已建立实体索引 ${indexed} / ${total} 份资料。${indexed < total ? '新导入的资料需要先抽取实体。' : '问答时会带上已确认关联资料的原文。'}<span class="spacer"></span>${button('build-entity-index', indexed ? '补充抽取实体' : '建立实体索引', 'button primary')}</div>
+    <div class="info-banner">${icon('link')}已建立实体索引 ${indexed} / ${total} 份资料。${indexed < total ? '新导入的资料需要先抽取实体。' : '问答时会带上已确认关联资料的原文。'}<span class="spacer"></span>${button('build-entity-index', indexed ? '补充抽取实体' : '建立实体索引', 'button primary')}${indexed ? button('rebuild-entity-index', '重建（含因果/时间）', 'button') : ''}</div>
     ${rows.length ? `<div class="relation-list">${rows.map((r: Row) => `<div class="relation-card"><div class="relation-nodes">${button('document', icon('book') + e(r.a_title), 'relation-node', `data-id="${r.a}"`)}<div class="relation-thread"><span>${relationNames[r.kind]}</span><i></i></div>${button('document', icon('book') + e(r.b_title), 'relation-node', `data-id="${r.b}"`)}</div><p>${e(r.reason)}</p>${(r.entities || []).length ? `<div class="relation-entities">${r.entities.map((x: Row) => `<span class="pill">${e(entityKindNames[x.kind] || '概念')} · ${e(x.name)}</span>`).join('')}</div><p class="small-note">依据 ${r.proof || 1} 个共同实体 · 关联强度 ${Number(r.score || 0).toFixed(1)}${r.proof >= 2 && r.score >= 1.5 ? ' · <span class="confirmed">强关联</span>' : ''}</p>` : ''}${relationSources(r)}<div class="toolbar"><span class="${r.status === 'confirmed' ? 'confirmed' : 'muted'}">${r.status === 'confirmed' ? '✓ 已确认' : '待确认的关联建议'}</span><span class="spacer"></span>${r.status === 'suggested' ? button('confirm-relation', '确认关联', 'button primary tiny', `data-id="${r.id}"`) : ''}${button('reject-relation', '移除关联', 'button subtle tiny', `data-id="${r.id}"`)}</div></div>`).join('')}</div>` : empty('让教程之间建立联系', '先点「建立实体索引」，再打开一份资料点「查找实体关联」。', 'nav', '前往知识库')}`;
 }
 
@@ -366,7 +366,7 @@ root.addEventListener('click', async event => {
     if (!window.confirm('删除这份资料？关联收藏和含有该来源的练习也会删除，此操作无法撤销。')) { state.modal = ''; return; }
   }
   if (a === 'restore-version' && !window.confirm('恢复这个版本？当前版本仍保留在历史中，相关旧来源索引、问答与练习将重新校验。')) return;
-  await work(({ 'import-file': '读取资料文件…', 'generate-tutorial': '正在根据来源整理教程…', 'related-ai': '正在分析教程之间的关系…', 'build-entity-index': '正在抽取实体并建立索引…', 'build-index': 'mem0 正在抽取并保存知识，首次同步可能需要几分钟…' } as Row)[a!] || '处理中…', async () => {
+  await work(({ 'import-file': '读取资料文件…', 'generate-tutorial': '正在根据来源整理教程…', 'related-ai': '正在分析教程之间的关系…', 'build-entity-index': '正在抽取实体并建立索引…', 'rebuild-entity-index': '正在重建实体索引与因果/时间连线…', 'build-index': 'mem0 正在抽取并保存知识，首次同步可能需要几分钟…' } as Row)[a!] || '处理中…', async () => {
     if (a === 'document') await openDoc(id);
     if (a === 'external-link') await api.openLink(target.dataset.url!);
     if (a === 'note-link') await followNoteLink(target.dataset.doc || state.selected,target.dataset.target!);
@@ -388,6 +388,7 @@ root.addEventListener('click', async event => {
     if (a === 'delete-card' || a === 'delete-memory') { await api.call(a.replace('-', '_'), { id }); await refresh(); }
     if (a === 'related-local' || a === 'related-ai') { await api.call('related', { id: state.selected, use_ai: a === 'related-ai' }); await refresh(); await openDoc(state.selected); toast('关联候选已更新，可确认或忽略'); }
     if (a === 'build-entity-index') { const result = await api.call('build_entity_index', { limit: 8 }); await refresh(); toast(`已为 ${result.documents.length} 份资料抽取 ${result.entities} 个实体`); }
+    if (a === 'rebuild-entity-index') { const result = await api.call('build_entity_index', { limit: 20, force: true }); await refresh(); toast(`已重建 ${result.documents.length} 份资料的实体与因果/时间连线`); }
     if (a === 'confirm-relation' || a === 'reject-relation') { await api.call('set_relation', { id, status: a === 'confirm-relation' ? 'confirmed' : 'rejected' }); await refresh(); if (state.detail) await openDoc(state.selected); }
     if (a === 'open-quiz') { state.quiz = await api.call('quiz', { id }); state.question = 0; }
     if (a === 'test-model') { const result = await api.call('test_model'); toast(result.message); }

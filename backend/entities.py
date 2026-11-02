@@ -284,11 +284,17 @@ def index_document(store, provider, document, replace=True):
     return stored
 
 
-def build_index(store, provider, document_id=None, limit=8, progress=None):
-    """Index documents that have no entities yet (or exactly one document)."""
+def build_index(store, provider, document_id=None, limit=8, progress=None, force=False):
+    """Index documents that have no entities yet, one document, or all when forced.
+
+    A rebuild replaces the document's mentions and causal links, which is required
+    after the extraction contract changes (e.g. adding temporal/causal links).
+    """
     indexed = store.entity_index_counts()
     if document_id:
         documents = [store.document(document_id)]
+    elif force:
+        documents = store.documents()
     else:
         documents = [d for d in store.documents() if not indexed.get(d['id'])]
     documents = documents[:limit]
@@ -296,11 +302,12 @@ def build_index(store, provider, document_id=None, limit=8, progress=None):
     for position, document in enumerate(documents, start=1):
         if progress:
             progress(position, len(documents), document['title'])
-        count = index_document(store, provider, document)
+        count = index_document(store, provider, document, replace=True)
         done.append({'document_id': document['id'], 'title': document['title'], 'entities': count})
         total_entities += count
-    return {'documents': done, 'entities': total_entities,
-            'remaining': max(0, len([d for d in store.documents() if not store.entity_index_counts().get(d['id'])]) if not document_id else 0)}
+    counts = store.entity_index_counts()
+    remaining = 0 if document_id else len([d for d in store.documents() if not counts.get(d['id'])])
+    return {'documents': done, 'entities': total_entities, 'remaining': remaining}
 
 
 def shared_entities(store, document_id):

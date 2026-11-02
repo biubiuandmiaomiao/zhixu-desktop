@@ -120,7 +120,8 @@ class Service:
             return knowledge.related(args['id'], args.get('use_ai', False))
         if action == 'build_entity_index':
             from .entities import build_index
-            return build_index(self.store, provider, args.get('id'), limit=int(args.get('limit', 8)))
+            return build_index(self.store, provider, args.get('id'), limit=int(args.get('limit', 8)),
+                               force=bool(args.get('force')))
         if action == 'set_relation':
             if args['status'] != 'confirmed':
                 self.mem0.remove(['relation:' + args['id']])

@@ -209,6 +209,22 @@ class SharedEntityTests(unittest.TestCase):
         merged = self.store.upsert_entity('DeepSeek V3', 'product')
         self.assertNotEqual(merged, hub_id)
 
+    def test_force_rebuild_reindexes_an_already_indexed_document(self):
+        document = self.store.add_document('智能体', '评估不足会导致智能体反复犯错。')
+        provider = FakeProvider(answer={'entities': [
+            {'name': '评估', 'type': 'concept', 'quote': '评估不足'},
+            {'name': '智能体', 'type': 'concept', 'quote': '智能体反复犯错'},
+        ], 'links': [{'from': '评估', 'to': '智能体', 'kind': 'causes', 'quote': '评估不足会导致智能体反复犯错'}]})
+        build_index(self.store, provider, document['id'])
+        ids = [row['entity_id'] for row in self.store.document_entities(document['id'])]
+        self.assertEqual(len(self.store.entity_links_between(ids)), 1)
+        build_index(self.store, provider, document['id'], force=True)
+        self.assertEqual(len(provider.calls), 2)
+        ids = [row['entity_id'] for row in self.store.document_entities(document['id'])]
+        # Replacing mentions/links must not duplicate rows.
+        self.assertEqual(len(self.store.entity_links_between(ids)), 1)
+        self.assertEqual(len(self.store.document_entities(document['id'])), 2)
+
     def test_indexed_document_drops_stale_keyword_suggestions(self):
         a = add_doc_with_entities(self.store, '闭包教程', '闭包捕获外部变量。', ['闭包'])
         b = add_doc_with_entities(self.store, '装饰器教程', '装饰器本质是闭包。', ['闭包'])
