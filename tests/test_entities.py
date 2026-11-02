@@ -3,7 +3,8 @@ import tempfile
 import unittest
 
 from backend.entities import (_validate_entities, build_index, describe, entity_similarity,
-                              index_document, normalize_entity, normalize_entity_kind, shared_entities)
+                              extract_entities, index_document, normalize_entity, normalize_entity_kind,
+                              shared_entities, temporal_weight)
 from backend.knowledge import Knowledge
 from backend.store import Store
 
@@ -183,6 +184,97 @@ class SharedEntityTests(unittest.TestCase):
         document_ids = {source['document_id'] for source in captured['sources']}
         self.assertIn(b['id'], document_ids)
         self.assertTrue(result['citations'])
+
+    def test_causal_and_contrast_relations_keep_direction(self):
+        a = add_doc_with_entities(self.store, 'Z 原因', '闭包导致作用域捕获。', ['闭包'])
+        b = add_doc_with_entities(self.store, 'A 结果', '作用域捕获带来内存占用。', ['内存占用'])
+        relation = self.store.suggest_relation(a['id'], b['id'], 'causes', 'A 的机制导致 B 的现象')
+        self.assertEqual((relation['a'], relation['b']), (a['id'], b['id']))
+        contrast = self.store.suggest_relation(a['id'], b['id'], 'contrast', '两种取舍')
+        self.assertEqual((contrast['a'], contrast['b']), (a['id'], b['id']))
+        shared = self.store.suggest_relation(a['id'], b['id'], 'shared', '同概念')
+        self.assertEqual((shared['a'], shared['b']), tuple(sorted((a['id'], b['id']))))
+        with self.assertRaisesRegex(ValueError, '关系'):
+            self.store.suggest_relation(a['id'], b['id'], 'related_to', '未定义类型')
+
+    def test_hub_entity_needs_higher_similarity_to_merge(self):
+        hub_doc = self.store.add_document('中枢文档', 'DeepSeek-V3 与很多概念一起出现。')
+        segment = self.store.segments(hub_doc['id'])[0]
+        hub_id = self.store.upsert_entity('DeepSeek-V3', 'product')
+        self.store.add_entity_mention(hub_id, hub_doc['id'], segment['id'], 'DeepSeek-V3')
+        for index in range(10):
+            partner_id = self.store.upsert_entity(f'伙伴概念{index}', 'concept')
+            self.store.add_entity_mention(partner_id, hub_doc['id'], segment['id'], '伙伴')
+        self.assertGreaterEqual(self.store.entity_partner_count(hub_id), 10)
+        merged = self.store.upsert_entity('DeepSeek V3', 'product')
+        self.assertNotEqual(merged, hub_id)
+
+    def test_indexed_document_drops_stale_keyword_suggestions(self):
+        a = add_doc_with_entities(self.store, '闭包教程', '闭包捕获外部变量。', ['闭包'])
+        b = add_doc_with_entities(self.store, '装饰器教程', '装饰器本质是闭包。', ['闭包'])
+        add_doc_with_entities(self.store, 'C 无关1', '篮球。', ['篮球'])
+        add_doc_with_entities(self.store, 'D 无关2', '投资。', ['投资'])
+        stale = self.store.suggest_relation(a['id'], b['id'], 'shared', '关键词候选：共同出现 这些、可以。（旧逻辑）')
+        keep = self.store.suggest_relation(a['id'], b['id'], 'supplement', '关键词召回 + AI 建议：有实质补充')
+        self.store.set_relation(keep['id'], 'confirmed')
+        Knowledge(self.store, FakeProvider(), None).related(a['id'], use_ai=False)
+        remaining = self.store.relations(a['id'])
+        ids = {row['id'] for row in remaining}
+        # The stale suggestion is either deleted or upgraded in place: no keyword text
+        # survives once real entity evidence exists.
+        self.assertFalse([row for row in remaining if str(row['reason']).startswith('关键词候选')])
+        self.assertIn(keep['id'], ids)
+
+    def test_causal_links_are_validated_and_persisted(self):
+        document = self.store.add_document('智能体', '评估不足会导致智能体反复犯错。')
+        provider = FakeProvider(answer={'entities': [
+            {'name': '评估', 'type': 'concept', 'quote': '评估不足'},
+            {'name': '智能体', 'type': 'concept', 'quote': '智能体反复犯错'},
+        ], 'links': [
+            {'from': '评估', 'to': '智能体', 'kind': 'causes', 'quote': '评估不足会导致智能体反复犯错'},
+            {'from': '评估', 'to': '智能体', 'kind': '猜测', 'quote': '评估不足会导致智能体反复犯错'},
+            {'from': '评估', 'to': '不存在', 'kind': 'causes', 'quote': '评估不足会导致智能体反复犯错'},
+            {'from': '评估', 'to': '智能体', 'kind': 'enables', 'quote': '原文没有这句'},
+        ]})
+        # extract_entities returns the validated links, index_document persists them.
+        extracted = extract_entities(provider, document['title'], document['content'])
+        self.assertEqual(len(extracted['links']), 1)
+        index_document(self.store, provider, document)
+        links = self.store.entity_links_between([row['entity_id'] for row in self.store.document_entities(document['id'])])
+        self.assertEqual([(link['kind'], link['a_name'], link['b_name']) for link in links],
+                         [('causes', '评估', '智能体')])
+        self.assertIn('会导致', links[0]['quote'])
+
+    def test_temporal_weight_follows_the_24_hour_window(self):
+        a = add_doc_with_entities(self.store, 'A', '闭包捕获外部变量。', ['闭包'])
+        b = add_doc_with_entities(self.store, 'B', '闭包决定作用域。', ['闭包'])
+        entity_id = self.store.document_entities(a['id'])[0]['entity_id']
+        with self.store.db:
+            self.store.db.execute("UPDATE documents SET created_at=? WHERE id=?", ('2026-10-30T10:00:00+00:00', a['id']))
+            self.store.db.execute("UPDATE documents SET created_at=? WHERE id=?", ('2026-10-30T12:00:00+00:00', b['id']))
+        weight = temporal_weight(self.store, [entity_id], a['id'], b['id'])
+        self.assertAlmostEqual(weight, 1 - 2 / 24, places=3)
+        with self.store.db:
+            self.store.db.execute("UPDATE documents SET created_at=? WHERE id=?", ('2026-11-05T10:00:00+00:00', b['id']))
+        self.assertEqual(temporal_weight(self.store, [entity_id], a['id'], b['id']), 0.0)
+
+    def test_related_prefers_an_extracted_causal_link(self):
+        a = add_doc_with_entities(self.store, 'A 原因', '评估不足会导致智能体反复犯错。', ['评估', '智能体'])
+        b = add_doc_with_entities(self.store, 'B 结果', '智能体的评估循环需要人工检查。', ['智能体'])
+        # Two more notes so 智能体 is a meaningful (not ubiquitous) shared entity.
+        add_doc_with_entities(self.store, 'C 无关1', '篮球比赛。', ['篮球'])
+        add_doc_with_entities(self.store, 'D 无关2', '投资建议。', ['投资'])
+        entities = {row['name']: row['entity_id'] for row in self.store.document_entities(a['id'])}
+        self.store.add_entity_link(entities['评估'], entities['智能体'], 'causes',
+                                   '评估不足会导致智能体反复犯错', a['id'],
+                                   self.store.segments(a['id'])[0]['id'])
+        relationships = Knowledge(self.store, FakeProvider(), None).related(a['id'], use_ai=False)
+        relation = next(row for row in relationships if {row['a'], row['b']} == {a['id'], b['id']})
+        self.assertEqual(relation['kind'], 'causes')
+        self.assertIn('实体因果', relation['reason'])
+        # Direction is preserved: the cause document stays first.
+        self.assertEqual((relation['a'], relation['b']), (a['id'], b['id']))
+        self.assertGreater(relation['score'], 0)
 
 
 if __name__ == '__main__':

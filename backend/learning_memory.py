@@ -4,7 +4,8 @@ from .provider import redact
 
 LANES = ('relation', 'review', 'conversation')
 RELATION_NAMES = {'shared': '共同知识', 'prerequisite': 'A 是 B 的前置知识',
-                  'supplement': '互补资料', 'difference': '差异或冲突'}
+                  'supplement': '互补资料', 'difference': '差异或冲突',
+                  'causes': 'A 解释或导致 B', 'contrast': '两种对立说法或取舍'}
 
 
 def learning_entities(store):

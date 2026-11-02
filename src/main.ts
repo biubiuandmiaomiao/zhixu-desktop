@@ -29,7 +29,7 @@ const pendingDocumentRefresh = new Set<string>();
 const escape = (x: unknown) => String(x ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 const e = escape;
 const typeNames: Row = { single: '单选题', multiple: '多选题', short: '简答题' };
-const relationNames: Row = { shared: '同一知识点', prerequisite: '前置知识 → 进阶', supplement: '补充案例', difference: '内容差异' };
+const relationNames: Row = { shared: '同一知识点', prerequisite: '前置知识 → 进阶', supplement: '补充案例', difference: '内容差异', causes: '因果 → A 解释 B', contrast: '对立 / 取舍' };
 const entityKindNames: Row = { person: '人物', org: '组织', product: '产品', work: '作品', place: '地点', tech: '技术', concept: '概念' };
 const icon = (name: string) => {
   const paths: Record<string, string> = {

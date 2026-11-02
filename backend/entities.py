@@ -13,6 +13,7 @@ are the same entity.
 import difflib
 import math
 import re
+from datetime import datetime
 
 ENTITY_KINDS = {
     'person': '人物',
@@ -97,15 +98,86 @@ def entity_similarity(left, right):
 
 
 def find_similar_entity(store, name, kind):
-    """Existing canonical entity close enough to reuse, ignoring cross-kind mixes."""
-    best, best_score = None, MERGE_THRESHOLD
+    """Existing canonical entity close enough to reuse, ignoring cross-kind mixes.
+
+    Fan-out discount: merging a hub entity (one that co-occurs with dozens of
+    others) is destructive, because a writing variant of a hub name is more likely
+    to be a genuinely different thing. The similarity bar therefore rises with how
+    many distinct entities the candidate already co-occurs with.
+    """
+    best, best_score = None, 0.0
     for row in store.rows('SELECT id,name,kind FROM entities'):
         if row['kind'] != kind and DEFAULT_KIND not in (row['kind'], kind):
             continue
         score = entity_similarity(name, row['name'])
-        if score >= best_score:
+        if score < MERGE_THRESHOLD:
+            continue
+        partners = store.entity_partner_count(row['id'])
+        required = MERGE_THRESHOLD + min(0.20, 0.05 * math.log2(1 + partners))
+        if score >= required and score > best_score:
             best, best_score = row, score
     return best
+
+
+LINK_KINDS = ('causes', 'enables', 'prevents', 'contrast')
+TEMPORAL_WINDOW_HOURS = 24
+
+
+def _validate_links(raw, entities, content):
+    """Keep only causal links whose endpoints are extracted entities and whose quote exists."""
+    if not isinstance(raw, list):
+        return []
+    haystack = _WHITESPACE.sub(' ', content or '')
+    by_name = {}
+    for entity in entities:
+        by_name[entity['name'].lower()] = entity['name']
+        for alias in entity.get('aliases') or []:
+            by_name.setdefault(alias.lower(), entity['name'])
+    kept, seen = [], set()
+    for item in raw[:8]:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get('kind')
+        if kind not in LINK_KINDS:
+            continue
+        source = by_name.get(str(item.get('from') or '').strip().lower())
+        target = by_name.get(str(item.get('to') or '').strip().lower())
+        quote = _WHITESPACE.sub(' ', str(item.get('quote') or '')).strip()
+        if not source or not target or source == target:
+            continue
+        if not quote or len(quote) > 200 or quote not in haystack:
+            continue
+        key = (source, target, kind)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append({'from': source, 'to': target, 'kind': kind, 'quote': quote})
+    return kept
+
+
+def temporal_weight(store, entity_ids, document_id, other_id):
+    """Hindsight-style temporal link weight for two notes sharing an entity.
+
+    weight = max(0.3, 1 - Δhours/24) when both mentions fall inside the 24h window,
+    zero otherwise. Time anchor is the document's creation time.
+    """
+    best = 0.0
+    for entity_id in dict.fromkeys(entity_ids or []):
+        stamps = {}
+        for row in store.entity_mention_times(entity_id):
+            if row['document_id'] in (document_id, other_id):
+                stamps.setdefault(row['document_id'], row['created_at'])
+        if len(stamps) < 2:
+            continue
+        try:
+            left = datetime.fromisoformat(stamps[document_id])
+            right = datetime.fromisoformat(stamps[other_id])
+        except (KeyError, ValueError):
+            continue
+        delta_hours = abs((left - right).total_seconds()) / 3600
+        if delta_hours <= TEMPORAL_WINDOW_HOURS:
+            best = max(best, max(0.3, 1 - delta_hours / TEMPORAL_WINDOW_HOURS))
+    return round(best, 3)
 
 
 def _clean_alias(value):
@@ -153,22 +225,27 @@ EXTRACTION_PROMPT = '''从这段学习资料中抽取用于"跨资料实体关�
 同一个事物在不同语言/简称下的写法必须放进 aliases（例如 name="评估" aliases=["evals","evaluation"]；name="吴恩达" aliases=["Andrew Ng"]），否则跨资料关联会断掉。
 entity 类型只能是：person（人物）、org（组织）、product（产品/软件）、work（作品/视频/书）、place（地点）、tech（技术/方法/框架）、concept（概念/术语）。
 每份资料抽取 8-20 个最值得跨资料连接的实体，宁少勿滥；每个实体给出原文中连续出现的一句 quote 作为依据（不超过 60 字），quote 必须逐字出现在原文中。
-返回 {"entities":[{"name":"评估","type":"concept","aliases":["evals","evaluation"],"quote":"评估是构建智能体工作流时用来持续改进系统的手段"}]}，没有可抽取的实体时返回 {"entities":[]}。'''
+返回 {"entities":[{"name":"评估","type":"concept","aliases":["evals","evaluation"],"quote":"评估是构建智能体工作流时用来持续改进系统的手段"}]}，没有可抽取的实体时返回 {"entities":[]}。
+如果原文明确表达了一个实体导致/帮助/阻止另一个实体，或两个实体之间存在实质对立取舍，把关系放进 links（最多 4 条，quote 必须逐字出现在原文中）：
+"links":[{"from":"实体A","to":"实体B","kind":"causes|enables|prevents|contrast","quote":"原文中表达这个关系的句子"}]
+只在原文明确表达时才输出，不要根据先验知识推测因果；没有则 links 为空数组。'''
 
 
 def extract_entities(provider, title, content):
-    """One LLM call per document; returns validated entities."""
+    """One LLM call per document; returns validated entities and causal links."""
     text = (content or '').strip()
     if not text:
-        return []
+        return {'entities': [], 'links': []}
     payload = {'title': title, 'text': text[:8000]}
     result = provider.json(EXTRACTION_PROMPT, payload)
-    return _validate_entities(result.get('entities'), text)
+    entities = _validate_entities(result.get('entities'), text)
+    return {'entities': entities, 'links': _validate_links(result.get('links'), entities, text)}
 
 
 def index_document(store, provider, document, replace=True):
-    """Extract, resolve and persist one document's entities and mentions."""
-    entities = extract_entities(provider, document['title'], document['content'])
+    """Extract, resolve and persist one document's entities, mentions and links."""
+    extracted = extract_entities(provider, document['title'], document['content'])
+    entities = extracted['entities']
     if not entities:
         return 0
     segments = store.segments(document['id'])
@@ -176,9 +253,12 @@ def index_document(store, provider, document, replace=True):
     if replace:
         with store.db:
             store.db.execute('DELETE FROM entity_mentions WHERE document_id=?', (document['id'],))
+            store.db.execute('DELETE FROM entity_links WHERE document_id=?', (document['id'],))
     stored = 0
+    entity_ids = {}
     for entity in entities:
         entity_id = store.upsert_entity(entity['name'], entity['kind'], entity['aliases'])
+        entity_ids[entity['name']] = entity_id
         segment_id = None
         for candidate_id, candidate_text in sentence_to_segment:
             if entity['quote'] and entity['quote'] in candidate_text:
@@ -195,6 +275,12 @@ def index_document(store, provider, document, replace=True):
             continue
         store.add_entity_mention(entity_id, document['id'], segment_id, entity['quote'])
         stored += 1
+    for link in extracted['links']:
+        source_id, target_id = entity_ids.get(link['from']), entity_ids.get(link['to'])
+        if not source_id or not target_id:
+            continue
+        segment_id = next((sid for sid, text in sentence_to_segment if link['quote'] in text), None)
+        store.add_entity_link(source_id, target_id, link['kind'], link['quote'], document['id'], segment_id)
     return stored
 
 

@@ -18,6 +18,12 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+# Relation kinds. Directed kinds keep the discovered orientation (A -> B) instead
+# of being sorted into an unordered pair.
+RELATION_KINDS = ('shared', 'prerequisite', 'supplement', 'difference', 'causes', 'contrast')
+DIRECTED_RELATION_KINDS = ('prerequisite', 'causes', 'contrast')
+
+
 def tokens(text):
     words = re.findall(r'[a-z0-9_]+|[\u4e00-\u9fff]+', text.lower())
     result = []
@@ -99,6 +105,16 @@ class Store:
                 relation_id TEXT NOT NULL REFERENCES relations(id) ON DELETE CASCADE,
                 entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
                 PRIMARY KEY(relation_id, entity_id));
+            CREATE TABLE IF NOT EXISTS entity_links(
+                id TEXT PRIMARY KEY,
+                a_entity TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+                b_entity TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL CHECK(kind IN ('causes','enables','prevents','contrast')),
+                quote TEXT NOT NULL,
+                document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                segment_id TEXT REFERENCES segments(id) ON DELETE CASCADE,
+                created_at TEXT NOT NULL,
+                UNIQUE(a_entity,b_entity,kind,document_id));
         ''')
         self.db.commit()
         if 'raw_result' not in {r['name'] for r in self.db.execute('PRAGMA table_info(tutorial_attempts)')}:
@@ -341,19 +357,22 @@ class Store:
     def suggest_relation(self, a, b, kind, reason, evidence=None, score=0.0, proof=1, top_entity=''):
         self.document(a)
         self.document(b)
-        if a == b or kind not in ('shared', 'prerequisite', 'supplement', 'difference'):
+        if a == b or kind not in RELATION_KINDS:
             raise ValueError('无效的资料关系')
-        if kind != 'prerequisite':
+        if kind not in DIRECTED_RELATION_KINDS:
             a, b = sorted([a, b])
         with self.db:
             self.db.execute('''INSERT OR IGNORE INTO relations(id,a,b,kind,reason,status,created_at,score,proof,top_entity)
                                VALUES(?,?,?,?,?,?,?,?,?,?)''',
                             (uid(), a, b, kind, reason, 'suggested', now(), float(score or 0), int(proof or 1), top_entity or ''))
-            # Refinement, not overwrite: keep the strongest observed evidence counts.
+            # Refinement, not overwrite: keep the strongest observed evidence counts,
+            # and replace a stale keyword reason once real evidence exists.
             self.db.execute('''UPDATE relations SET score=MAX(score,?), proof=MAX(proof,?),
-                               top_entity=CASE WHEN ?<>'' THEN ? ELSE top_entity END
+                               top_entity=CASE WHEN ?<>'' THEN ? ELSE top_entity END,
+                               reason=CASE WHEN reason LIKE '关键词%' AND ? NOT LIKE '关键词%' THEN ? ELSE reason END
                                WHERE a=? AND b=? AND kind=?''',
-                            (float(score or 0), int(proof or 1), top_entity or '', top_entity or '', a, b, kind))
+                            (float(score or 0), int(proof or 1), top_entity or '', top_entity or '',
+                             reason or '', reason or '', a, b, kind))
         relation = self.rows('SELECT * FROM relations WHERE a=? AND b=? AND kind=?', (a, b, kind))[0]
         if evidence and relation['status'] != 'rejected':
             with self.db:
@@ -454,6 +473,35 @@ class Store:
         return self.rows('''SELECT m.entity_id,m.segment_id,m.quote,e.name,e.kind FROM entity_mentions m
                             JOIN entities e ON e.id=m.entity_id WHERE m.document_id=? ORDER BY e.name''', (document_id,))
 
+    # ---- entity edges: causal (extracted) and temporal (deterministic) ----------
+    def add_entity_link(self, a_entity, b_entity, kind, quote, document_id, segment_id=None):
+        if kind not in ('causes', 'enables', 'prevents', 'contrast') or a_entity == b_entity:
+            return
+        with self.db:
+            self.db.execute('''INSERT OR IGNORE INTO entity_links
+                               (id,a_entity,b_entity,kind,quote,document_id,segment_id,created_at)
+                               VALUES(?,?,?,?,?,?,?,?)''',
+                            (uid(), a_entity, b_entity, kind, str(quote or '')[:300], document_id,
+                             segment_id, now()))
+
+    def entity_links_between(self, entity_ids):
+        """Causal/contrast edges whose both endpoints are in the given entity set."""
+        ids = [entity_id for entity_id in dict.fromkeys(entity_ids or []) if entity_id]
+        if len(ids) < 2:
+            return []
+        placeholders = ','.join('?' for _ in ids)
+        return self.rows(f'''SELECT l.*, a.name AS a_name, b.name AS b_name FROM entity_links l
+                             JOIN entities a ON a.id=l.a_entity JOIN entities b ON b.id=l.b_entity
+                             WHERE l.a_entity IN ({placeholders}) AND l.b_entity IN ({placeholders})
+                             ORDER BY l.created_at DESC LIMIT 8''', ids + ids)
+
+    def entity_mention_times(self, entity_id):
+        """When each document mentioning this entity was added (its time anchor)."""
+        return self.rows('''SELECT m.document_id,d.created_at,m.segment_id,s.start
+                            FROM entity_mentions m JOIN documents d ON d.id=m.document_id
+                            LEFT JOIN segments s ON s.id=m.segment_id
+                            WHERE m.entity_id=?''', (entity_id,))
+
     def entity_index_counts(self):
         return {r['document_id']: r['entities'] for r in self.rows(
             'SELECT document_id,COUNT(DISTINCT entity_id) AS entities FROM entity_mentions GROUP BY document_id')}
@@ -461,6 +509,14 @@ class Store:
     def entity_document_counts(self):
         return {r['entity_id']: r['documents'] for r in self.rows(
             'SELECT entity_id,COUNT(DISTINCT document_id) AS documents FROM entity_mentions GROUP BY entity_id')}
+
+    def entity_partner_count(self, entity_id):
+        """How many distinct entities share a document with this one (its fan-out)."""
+        rows = self.rows('''SELECT COUNT(DISTINCT other.entity_id) AS partners FROM entity_mentions mine
+                            JOIN entity_mentions other ON other.document_id=mine.document_id
+                                 AND other.entity_id<>mine.entity_id
+                            WHERE mine.entity_id=?''', (entity_id,))
+        return int(rows[0]['partners']) if rows else 0
 
     def set_relation_entities(self, relation_id, entity_ids):
         with self.db:
