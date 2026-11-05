@@ -29,9 +29,12 @@ class Service:
         # Credentials stay in process memory; background jobs persist options, never keys.
         self._media_api_key = api_key
         provider = Provider(self.store.settings(), api_key)
-        setting = self.store.settings().get('web_search_provider')
+        settings = self.store.settings()
+        setting = settings.get('web_search_provider')
         search_provider = default_provider() if not setting else ('' if setting == 'off' else setting)
-        web = WebSearch(search_provider, search_key)
+        engines = [item.strip() for item in str(settings.get('mcp_engines') or '').split(',') if item.strip()]
+        web = WebSearch(search_provider, search_key, mcp_command=settings.get('mcp_command') or None,
+                        mcp_engines=engines or None)
         knowledge = Knowledge(self.store, provider, self.vectors, self.mem0, web if web.configured else None)
         review = Review(self.store, provider, self.mem0)
         if action == 'bootstrap':
@@ -43,6 +46,7 @@ class Service:
                     'mem0': self.mem0.status(provider), 'media_jobs': self.media.status(), 'media_active': self.media.activity()['active'],
                     'has_search_key': bool(search_key), 'web_search_providers': provider_labels(),
                     'web_search_ready': web.configured, 'web_search_provider': web.provider,
+                    'mcp_available': web.mcp.configured, 'mcp_command': web.mcp.command,
                     'entity_index': self.store.entity_index_counts()}
         if action == 'document':
             return {'document': self.store.document(args['id']), 'segments': self.store.segments(args['id']),

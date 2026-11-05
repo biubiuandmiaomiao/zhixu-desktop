@@ -14,12 +14,17 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .mcpsearch import DEFAULT_COMMAND as MCP_DEFAULT_COMMAND, McpSearch, command_available
 from .provider import redact
 
 MAX_RESULTS = 6
 RESPONSE_LIMIT = 1_000_000
 
 PROVIDERS = {
+    'mcp': {
+        'label': 'MCP 搜索（open-websearch）',
+        'mcp': True,
+    },
     'builtin': {
         'label': '网页搜索（免密钥）',
         'keyless': True,
@@ -99,14 +104,16 @@ def provider_labels():
 
 
 def default_provider():
-    return 'builtin'
+    # Prefer the locally installed MCP search server; fall back to keyless scraping.
+    return 'mcp' if command_available(MCP_DEFAULT_COMMAND) else 'builtin'
 
 
 class WebSearch:
-    def __init__(self, provider, api_key, opener=None):
+    def __init__(self, provider, api_key, opener=None, mcp_command=None, mcp_args=None, mcp_engines=None):
         self.provider = provider if provider in PROVIDERS else ''
         self.api_key = api_key
         self.opener = opener or urllib.request.build_opener(_NoRedirect())
+        self.mcp = McpSearch(mcp_command or MCP_DEFAULT_COMMAND, mcp_args, engines=mcp_engines)
 
     @property
     def keyless(self):
@@ -114,6 +121,8 @@ class WebSearch:
 
     @property
     def configured(self):
+        if self.provider == 'mcp':
+            return self.mcp.configured
         return bool(self.provider) and (self.keyless or bool(self.api_key))
 
     def search(self, query, limit=MAX_RESULTS):
@@ -123,6 +132,14 @@ class WebSearch:
         if not query:
             return []
         limit = max(1, min(MAX_RESULTS, int(limit)))
+        if self.provider == 'mcp':
+            scored = [(row, _relevance_score(query, row)) for row in self.mcp.search(query, limit * 2)]
+            scored = [(row, score) for row, score in scored if score > 0]
+            scored.sort(key=lambda item: -item[1])
+            if not scored:
+                raise ValueError('MCP 搜索没有返回相关结果')
+            return [{'title': redact(row['title'])[:200], 'url': row['url'],
+                     'snippet': redact(row['snippet'])[:800]} for row, _ in scored[:limit]]
         if self.provider == 'builtin':
             return self._search_builtin(query, limit)
         spec = PROVIDERS[self.provider]
@@ -203,6 +220,18 @@ class WebSearch:
                          'snippet': redact(row['snippet'])[:800]} for row in relevant]
             errors.append(f'{name}: 结果与问题不相关')
         raise ValueError('联网搜索没有返回可用结果（' + '；'.join(errors[:2]) + '）')
+
+
+def _relevance_score(query, row):
+    """How many of the question's own bigrams appear in the result."""
+    haystack = ((row.get('title') or '') + ' ' + (row.get('snippet') or '')).lower()
+    score = 0
+    for token in re.findall(r'[a-z0-9_]+|[\u4e00-\u9fff]{2,}', query.lower()):
+        if re.search(r'[\u4e00-\u9fff]', token):
+            score += sum(1 for index in range(len(token) - 1) if token[index:index + 2] in haystack)
+        elif token in haystack:
+            score += 1
+    return score
 
 
 def _relevant(query, row):

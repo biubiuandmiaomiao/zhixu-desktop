@@ -613,7 +613,8 @@ class Store:
         return {r['key']: json.loads(r['value']) for r in self.rows('SELECT * FROM settings')}
 
     def save_settings(self, settings):
-        allowed = {'base_url', 'model', 'embedding_model', 'embedding_url', 'web_search_provider'}
+        allowed = {'base_url', 'model', 'embedding_model', 'embedding_url', 'web_search_provider',
+                   'mcp_command', 'mcp_engines'}
         with self.db:
             for key, value in settings.items():
                 if key in allowed:
